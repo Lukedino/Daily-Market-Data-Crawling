@@ -100,6 +100,134 @@ def collect_daily() -> pd.DataFrame:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# [1b] Daily 보완 — FDR StockListing 누락 종목 yfinance fallback
+# ══════════════════════════════════════════════════════════════════════════════
+
+def collect_missing_today(
+    missing_codes: list[str],
+    code_meta: dict[str, dict],
+    target_date: Optional[date] = None,
+) -> pd.DataFrame:
+    """
+    FDR StockListing 누락 종목을 yfinance로 보완 수집 (당일 단일 거래일).
+
+    매매정지·관리종목·일시 누락 등으로 FDR 스냅샷에서 빠진 종목 중
+    yfinance에 당일 거래 데이터가 있는 종목을 marcap 스키마로 반환.
+
+    Args:
+        missing_codes: 6자리 종목코드 리스트
+        code_meta: {code: {"Name": ..., "Market": ...}} (직전 parquet에서 추출)
+        target_date: 수집 대상 거래일 (기본 today)
+
+    Returns:
+        marcap 스키마 DataFrame (Marcap/Rank=NaN)
+    """
+    if not missing_codes:
+        return pd.DataFrame()
+
+    try:
+        import yfinance as yf
+    except ImportError:
+        raise ImportError("yfinance를 설치하세요: pip install yfinance")
+
+    tgt = target_date or date.today()
+    # yfinance는 end exclusive — 거래일 + 1일 윈도우, 안전 마진 위해 -1 ~ +1
+    start_str = (tgt - timedelta(days=1)).strftime("%Y-%m-%d")
+    end_str = (tgt + timedelta(days=1)).strftime("%Y-%m-%d")
+
+    # yf_ticker 구성 (메타 없으면 KOSPI(.KS) 기본)
+    yf_tickers = []
+    code_by_yf = {}
+    for code in missing_codes:
+        meta = code_meta.get(code, {})
+        market = meta.get("Market") or "KOSPI"
+        suffix = _SUFFIX_MAP.get(market, ".KS")
+        yf_t = f"{code}{suffix}"
+        yf_tickers.append(yf_t)
+        code_by_yf[yf_t] = code
+
+    logger.info(
+        f"[KrCollector] 누락 종목 yfinance 보완: {len(yf_tickers)}종목 "
+        f"({tgt})"
+    )
+
+    all_rows = []
+    for i in range(0, len(yf_tickers), _BATCH_SIZE):
+        batch = yf_tickers[i: i + _BATCH_SIZE]
+        try:
+            raw = yf.download(
+                batch,
+                start=start_str,
+                end=end_str,
+                auto_adjust=True,
+                progress=False,
+                group_by="ticker",
+                threads=True,
+            )
+        except Exception as e:
+            logger.warning(f"[KrCollector] 보완 배치 다운로드 실패: {e}")
+            time.sleep(1.0)
+            continue
+
+        if raw is None or raw.empty:
+            continue
+
+        for yf_t in batch:
+            try:
+                df_t = _extract_ticker(raw, yf_t, len(batch))
+                if df_t is None or df_t.empty:
+                    continue
+
+                code = code_by_yf[yf_t]
+                meta = code_meta.get(code, {})
+                name = meta.get("Name", "")
+                market = meta.get("Market") or "KOSPI"
+
+                df_t = df_t.reset_index()
+                df_t["Date"] = pd.to_datetime(df_t["Date"])
+                if df_t["Date"].dt.tz is not None:
+                    df_t["Date"] = df_t["Date"].dt.tz_localize(None)
+
+                # target_date에 해당하는 행만 선택 (보완 목적상 당일 단일행)
+                df_t = df_t[df_t["Date"].dt.date == tgt]
+                if df_t.empty:
+                    continue
+
+                df_t["Code"] = code
+                df_t["Name"] = name
+                df_t["Market"] = market
+                df_t["MarketId"] = _MARKETID_MAP.get(market, "STK")
+                df_t["Dept"] = None
+                df_t["ChangeCode"] = None
+                df_t["Changes"] = float("nan")
+                df_t["ChangesRatio"] = float("nan")
+                df_t["Amount"] = df_t["Close"] * df_t["Volume"]
+                df_t["Marcap"] = float("nan")
+                df_t["Stocks"] = 0
+                df_t["Rank"] = 0
+
+                df_t = df_t.dropna(subset=["Close"])
+                df_t = df_t[df_t["Close"] > 0]
+                if df_t.empty:
+                    continue
+                all_rows.append(_normalize_schema(df_t))
+
+            except Exception as e:
+                logger.debug(f"[KrCollector] {yf_t} 보완 스킵: {type(e).__name__}: {e}")
+
+        time.sleep(0.5)
+
+    if not all_rows:
+        logger.info("[KrCollector] 누락 종목 보완: 유효 결과 없음 (상장폐지·휴장 추정)")
+        return pd.DataFrame()
+
+    result = pd.concat(all_rows, ignore_index=True)
+    result = result.drop_duplicates(subset=["Code", "Date"], keep="last")
+    logger.info(f"[KrCollector] 누락 종목 보완 완료: {len(result)}종목")
+    return result
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # [2] Backfill — yfinance (과거 OHLCV)
 # ══════════════════════════════════════════════════════════════════════════════
 

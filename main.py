@@ -331,6 +331,49 @@ def run_kr_daily(args):
         logger.error("[KrDaily] 오늘 수집 실패 → 종료")
         return
 
+    # 3b. 누락 종목 yfinance 보완
+    #   FDR StockListing은 매매정지·관리종목 등 일부 활성 종목을 누락하는 경우가 있어,
+    #   직전 영업일 parquet에 있었으나 오늘 결과에 없는 종목을 yfinance로 재시도.
+    #   마지막 거래일이 너무 오래된 종목(>7일)은 상장폐지로 간주하고 스킵.
+    try:
+        prior = kr_db.load_year(current_year)
+        if not prior.empty:
+            today_ts = pd.Timestamp(today)
+            prior_dates = prior["Date"].dropna().unique()
+            recent_cutoff = today_ts - pd.Timedelta(days=7)
+            recent_codes = set(
+                prior[prior["Date"] >= recent_cutoff]["Code"].astype(str).str.zfill(6)
+            )
+            today_codes = set(df["Code"].astype(str).str.zfill(6))
+            missing_codes = sorted(recent_codes - today_codes)
+
+            if missing_codes:
+                logger.info(
+                    f"[KrDaily] FDR 누락 감지: {len(missing_codes)}종목 → yfinance 보완 시도"
+                )
+                # 메타(Name/Market) 추출 — 종목별 최근 행 기준
+                meta_src = prior.assign(
+                    _Code=prior["Code"].astype(str).str.zfill(6)
+                ).sort_values("Date")
+                latest_meta = meta_src.drop_duplicates(subset=["_Code"], keep="last")
+                meta_lookup = latest_meta.set_index("_Code")[["Name", "Market"]].to_dict("index")
+                code_meta = {
+                    code: {
+                        "Name": (meta_lookup.get(code) or {}).get("Name", "") or "",
+                        "Market": (meta_lookup.get(code) or {}).get("Market", "") or "KOSPI",
+                    }
+                    for code in missing_codes
+                }
+                supp = kr_collector.collect_missing_today(missing_codes, code_meta, today)
+                if not supp.empty:
+                    df = pd.concat([df, supp], ignore_index=True)
+                    df = df.drop_duplicates(subset=["Code", "Date"], keep="first")
+                    logger.info(
+                        f"[KrDaily] 보완 merge 완료: {len(supp)}종목 추가 (총 {len(df)}종목)"
+                    )
+    except Exception as e:
+        logger.warning(f"[KrDaily] 누락 종목 보완 단계 실패 (무시하고 계속): {e}")
+
     # 4. 저장
     updated = kr_db.append_rows(df)
 
