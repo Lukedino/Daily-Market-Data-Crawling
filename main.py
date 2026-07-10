@@ -270,6 +270,28 @@ def run_ohlc_update(args):
             logger.info(f"[DryRun] {market.upper()} ohlc update 시뮬레이션")
 
 
+def run_ohlc_new_backfill(args):
+    """
+    US/Crypto 유니버스에 새로 추가된 종목만 골라 과거 이력을 백필한다.
+    daily(ohlc-update)에서도 자동으로 실행되지만, 즉시 반영하고 싶을 때 수동으로 실행 가능.
+    """
+    from data import ohlc_collector
+    markets = ["us", "crypto"] if args.market == "all" else [args.market]
+    for market in markets:
+        if args.dry_run:
+            logger.info(f"[DryRun] {market.upper()} 신규 종목 백필 시뮬레이션")
+            continue
+        new_tickers = ohlc_collector.backfill_new_tickers(
+            market=market,
+            start_year=args.start_year,
+            upload=args.upload_drive,
+        )
+        if new_tickers:
+            logger.info(f"[OhlcNewBackfill] {market.upper()} 신규 종목 백필 완료: {new_tickers}")
+        else:
+            logger.info(f"[OhlcNewBackfill] {market.upper()} 신규 종목 없음")
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # financials-update 모드
 # ══════════════════════════════════════════════════════════════════════════════
@@ -528,13 +550,14 @@ def main():
 
     parser.add_argument(
         "--mode",
-        choices=["daily", "bootstrap", "ohlc-backfill", "ohlc-update", "financials-update",
-                 "kr-daily", "kr-backfill", "sector-meta"],
+        choices=["daily", "bootstrap", "ohlc-backfill", "ohlc-update", "ohlc-new-backfill",
+                 "financials-update", "kr-daily", "kr-backfill", "sector-meta"],
         required=True,
         help=(
             "daily: 오늘 수집 / bootstrap: 과거 연도 일괄 수집 / "
             "ohlc-backfill: US/Crypto OHLC 초기 적재 / "
             "ohlc-update: US/Crypto OHLC 증분 업데이트 / "
+            "ohlc-new-backfill: US/Crypto 신규 종목만 골라 과거 이력 백필 / "
             "financials-update: US 재무제표 + Crypto 시장 데이터 수집 / "
             "kr-daily: KR 오늘 스냅샷 수집 (FDR) / "
             "kr-backfill: KR 과거 누락 구간 수집 (yfinance) / "
@@ -638,6 +661,8 @@ def main():
         run_ohlc_backfill(args)
     elif args.mode == "ohlc-update":
         run_ohlc_update(args)
+    elif args.mode == "ohlc-new-backfill":
+        run_ohlc_new_backfill(args)
     elif args.mode == "financials-update":
         run_financials_update(args)
     elif args.mode == "kr-daily":
