@@ -249,12 +249,19 @@ def run_ohlc_update(args):
     """
     US/Crypto OHLC 증분 업데이트.
     마지막 업데이트 이후 누락된 데이터를 수집.
+    신규 종목이 유니버스에 추가된 경우, 증분 업데이트 전에 과거 이력을 먼저 백필한다.
     """
     from data import ohlc_collector
     markets = ["us", "crypto"] if args.market == "all" else [args.market]
     for market in markets:
         logger.info(f"[OhlcUpdate] {market.upper()} 증분 업데이트 시작")
         if not args.dry_run:
+            new_tickers = ohlc_collector.backfill_new_tickers(
+                market=market,
+                upload=args.upload_drive,
+            )
+            if new_tickers:
+                logger.info(f"[OhlcUpdate] {market.upper()} 신규 종목 백필 완료: {new_tickers}")
             ohlc_collector.update_market(
                 market=market,
                 upload=args.upload_drive,
