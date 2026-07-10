@@ -11,6 +11,7 @@ data/ohlc_db.py — US/Crypto OHLC 로컬 Parquet DB 관리
 
 import json
 import logging
+import re
 from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
@@ -65,6 +66,31 @@ def load_year(market: str, year: int) -> pd.DataFrame:
     except Exception as e:
         logger.error(f"[OhlcDB] {path.name} 로드 실패: {e}")
         return pd.DataFrame(columns=_SCHEMA_COLS)
+
+
+def list_known_tickers(market: str) -> set[str]:
+    """
+    로컬 연도별 parquet 파일들({market}_YYYY.parquet)에서
+    한 번이라도 수집된 Ticker 집합을 반환.
+    {market}_sector_meta.parquet 등 연도 파일이 아닌 것은 제외한다.
+    """
+    mdir = local_dir(market)
+    if not mdir.exists():
+        return set()
+
+    year_pattern = re.compile(rf"^{re.escape(market)}_\d{{4}}\.parquet$")
+    known: set[str] = set()
+
+    for pfile in sorted(mdir.glob(f"{market}_*.parquet")):
+        if not year_pattern.match(pfile.name):
+            continue
+        try:
+            table = pq.read_table(str(pfile), columns=["Ticker"])
+            known.update(table.column("Ticker").to_pylist())
+        except Exception as e:
+            logger.warning(f"[OhlcDB] {pfile.name} Ticker 컬럼 읽기 실패: {e}")
+
+    return known
 
 
 def save_year(df: pd.DataFrame, market: str, year: int):
