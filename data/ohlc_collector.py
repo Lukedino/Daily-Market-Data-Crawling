@@ -585,14 +585,19 @@ def backfill_new_tickers(
         new_last = max(all_dates)
         new_oldest = min(all_dates)
 
-        last_dt = new_last
+        # last_updated는 update_market()의 증분 커서이며 "기존 종목 전체가 이 날짜까지
+        # 수집 완료됨"을 의미한다. backfill_new_tickers()는 신규 종목이라는 부분집합만
+        # 수집하므로 이 커서를 앞당길 권한이 없다. 기존 값이 있으면 절대 건드리지 않고
+        # 그대로 보존하며, status.json 자체가 없는 최초 부트스트랩(신규 마켓)의 경우에만
+        # 이번에 수집한 날짜로 초기값을 채운다.
         existing_last_str = market_status.get("last_updated")
         if existing_last_str:
             try:
-                existing_last = datetime.strptime(existing_last_str, "%Y-%m-%d").date()
-                last_dt = max(existing_last, new_last)
+                last_dt = datetime.strptime(existing_last_str, "%Y-%m-%d").date()
             except ValueError:
-                pass
+                last_dt = new_last
+        else:
+            last_dt = new_last
 
         oldest_dt = new_oldest
         existing_oldest_str = market_status.get("oldest_date")
