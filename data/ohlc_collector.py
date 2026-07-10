@@ -506,6 +506,111 @@ def backfill_market(
     logger.info(f"[OhlcCollector] {market.upper()} 백필 완료: {start_year}~{end_year}년")
 
 
+def backfill_new_tickers(
+    market: str,
+    start_year: int = 2020,
+    upload: bool = True,
+) -> list[str]:
+    """
+    현재 유니버스에서 지금까지 한 번도 수집되지 않은 신규 종목을 찾아
+    start_year ~ 올해까지 과거 이력을 백필한다.
+
+    Args:
+        market:     "us" 또는 "crypto"
+        start_year: 백필 시작 연도 (기본 2020, ohlc-backfill 기본값과 동일)
+        upload:     True면 연도별 저장 후 Drive 업로드
+
+    Returns:
+        새로 발견되어 백필된 티커 목록 (없으면 빈 리스트)
+    """
+    from data import ohlc_db
+
+    ohlc_db.download_all_years(market)
+    ohlc_db.download_status()
+
+    known = ohlc_db.list_known_tickers(market)
+    universe = load_tickers(market)
+    new_tickers = [t for t in universe if t not in known]
+
+    if not new_tickers:
+        logger.info(f"[NewTickerBackfill] {market.upper()} 신규 종목 없음")
+        return []
+
+    logger.info(
+        f"[NewTickerBackfill] {market.upper()} 신규 종목 {len(new_tickers)}개 발견: {new_tickers}"
+    )
+
+    current_year = date.today().year
+    all_dates: list[date] = []
+
+    for year in range(start_year, current_year + 1):
+        start_str = f"{year}-01-01"
+        if year == current_year:
+            end_str = (date.today() + timedelta(days=1)).strftime("%Y-%m-%d")
+        else:
+            end_str = f"{year + 1}-01-01"
+
+        logger.info(
+            f"[NewTickerBackfill] {market.upper()} {year}년 수집 중... "
+            f"({len(new_tickers)}종목)"
+        )
+        try:
+            df = fetch_ohlc_range(new_tickers, start_str, end_str)
+        except Exception as e:
+            logger.error(f"[NewTickerBackfill] {market} {year}년 수집 실패: {e}")
+            continue
+
+        if df.empty:
+            logger.warning(f"[NewTickerBackfill] {market} {year}년 데이터 없음")
+            continue
+
+        if year == current_year:
+            if market == "crypto":
+                df = _enrich_crypto_marketcap(df)
+            else:
+                df = _enrich_us_marketcap(df)
+
+        ohlc_db.save_year(df, market, year)
+
+        if "Date" in df.columns:
+            all_dates.extend(df["Date"].tolist())
+
+        if upload:
+            ohlc_db.upload_years(market, [year])
+
+    if all_dates:
+        status = ohlc_db.load_status()
+        market_status = status.get(market, {})
+
+        new_last = max(all_dates)
+        new_oldest = min(all_dates)
+
+        last_dt = new_last
+        existing_last_str = market_status.get("last_updated")
+        if existing_last_str:
+            try:
+                existing_last = datetime.strptime(existing_last_str, "%Y-%m-%d").date()
+                last_dt = max(existing_last, new_last)
+            except ValueError:
+                pass
+
+        oldest_dt = new_oldest
+        existing_oldest_str = market_status.get("oldest_date")
+        if existing_oldest_str:
+            try:
+                existing_oldest = datetime.strptime(existing_oldest_str, "%Y-%m-%d").date()
+                oldest_dt = min(existing_oldest, new_oldest)
+            except ValueError:
+                pass
+
+        ohlc_db.update_status(market, last_dt, len(universe), oldest_dt)
+        if upload:
+            ohlc_db.upload_status()
+
+    logger.info(f"[NewTickerBackfill] {market.upper()} 신규 종목 백필 완료: {new_tickers}")
+    return new_tickers
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 증분 업데이트
 # ══════════════════════════════════════════════════════════════════════════════
