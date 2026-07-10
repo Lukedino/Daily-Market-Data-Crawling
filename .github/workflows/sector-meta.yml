@@ -35,6 +35,7 @@ jobs:
         env:
           GDRIVE_OHLC_FOLDER_ID:       ${{ secrets.GDRIVE_OHLC_FOLDER_ID }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_APPLICATION_CREDENTIALS }}
+          GDRIVE_LUKE_PICKS_FILE_ID:   ${{ secrets.GDRIVE_LUKE_PICKS_FILE_ID }}
         run: |
           ARGS="--mode sector-meta --upload-drive --market ${{ inputs.market || 'all' }}"
           ${{ inputs.dry_run == 'true' && 'true' || 'false' }} && ARGS="$ARGS --dry-run"
