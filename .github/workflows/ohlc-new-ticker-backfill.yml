@@ -1,0 +1,50 @@
+name: "OHLC 신규 종목 백필 — US/Crypto"
+
+on:
+  workflow_dispatch:
+    inputs:
+      market:
+        description: '대상 시장'
+        type: choice
+        options: [all, us, crypto]
+        default: all
+      start_year:
+        description: '수집 시작 연도'
+        required: false
+        default: '2020'
+      dry_run:
+        description: '테스트 실행 (저장 없음)'
+        type: boolean
+        default: false
+
+jobs:
+  new-ticker-backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: OHLC New Ticker Backfill
+        env:
+          GDRIVE_FOLDER_ID:            ${{ secrets.GDRIVE_FOLDER_ID }}
+          GDRIVE_OHLC_FOLDER_ID:       ${{ secrets.GDRIVE_OHLC_FOLDER_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_APPLICATION_CREDENTIALS }}
+        run: |
+          ARGS="--mode ohlc-new-backfill --upload-drive --market ${{ inputs.market }} --start-year ${{ inputs.start_year }}"
+          ${{ inputs.dry_run }} && ARGS="$ARGS --dry-run"
+          python main.py $ARGS
+      - name: Upload log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ohlc-new-ticker-backfill-log-${{ github.run_id }}
+          path: collection.log
+      - name: Cleanup credentials
+        if: always()
+        run: rm -f gdrive_creds.json
