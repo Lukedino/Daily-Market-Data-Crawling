@@ -21,6 +21,9 @@ on:
         type: boolean
         default: false
 
+permissions:
+  contents: read
+
 jobs:
   backfill:
     runs-on: ubuntu-latest
@@ -36,14 +39,21 @@ jobs:
         run: pip install -r requirements.txt
       - name: OHLC Backfill
         env:
+          MARKET:                     ${{ inputs.market }}
+          START_YEAR:                 ${{ inputs.start_year }}
+          END_YEAR:                   ${{ inputs.end_year }}
+          DRY_RUN:                    ${{ inputs.dry_run }}
           GDRIVE_FOLDER_ID:            ${{ secrets.GDRIVE_FOLDER_ID }}
           GDRIVE_OHLC_FOLDER_ID:       ${{ secrets.GDRIVE_OHLC_FOLDER_ID }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_APPLICATION_CREDENTIALS }}
         run: |
-          ARGS="--mode ohlc-backfill --upload-drive --market ${{ inputs.market }} --start-year ${{ inputs.start_year }}"
-          [ -n "${{ inputs.end_year }}" ] && ARGS="$ARGS --end-year ${{ inputs.end_year }}"
-          ${{ inputs.dry_run }} && ARGS="$ARGS --dry-run"
-          python main.py $ARGS
+          set -euo pipefail
+          [[ "$START_YEAR" =~ ^[0-9]{4}$ ]] || { echo "invalid start_year: $START_YEAR"; exit 1; }
+          [[ -z "$END_YEAR" || "$END_YEAR" =~ ^[0-9]{4}$ ]] || { echo "invalid end_year: $END_YEAR"; exit 1; }
+          ARGS=(--mode ohlc-backfill --upload-drive --market "$MARKET" --start-year "$START_YEAR")
+          [ -n "$END_YEAR" ] && ARGS+=(--end-year "$END_YEAR")
+          [[ "$DRY_RUN" == "true" ]] && ARGS+=(--dry-run)
+          python main.py "${ARGS[@]}"
       - name: Upload log
         if: always()
         uses: actions/upload-artifact@v4
