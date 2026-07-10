@@ -33,9 +33,6 @@ _UNIVERSE_FILES = {
     "crypto": "input/crypto_universe.txt",
 }
 
-# ── LukePicks 경로 ────────────────────────────────────────────────────────────
-_LUKE_PICKS_PATH = Path("input/Luke Picks.xlsx")
-
 # ── MANUAL 보완 목록 (동적 크롤링 실패 시 최소 보장) ─────────────────────────
 _MANUAL_US = [
     "SPY", "QQQ", "IWM", "DIA", "VOO", "VTI", "ARKK",
@@ -137,19 +134,62 @@ def _fetch_dow30() -> list[str]:
     return []
 
 
-def _load_luke_picks() -> list[str]:
-    if not _LUKE_PICKS_PATH.exists():
+def _load_luke_picks_from_drive() -> list[str]:
+    """
+    Google Drive에서 개인 관심종목 리스트(단순 Ticker 컬럼)를 다운로드하여 파싱.
+    GOOGLE_SERVICE_ACCOUNT_JSON + GDRIVE_LUKE_PICKS_FILE_ID 둘 다 있어야 동작.
+    둘 중 하나라도 없거나 실패하면 조용히 빈 리스트 반환 (필수 기능 아님).
+    """
+    import os
+
+    sa_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+    file_id = os.environ.get("GDRIVE_LUKE_PICKS_FILE_ID", "")
+    if not sa_json or not file_id:
         return []
+
     try:
-        df = pd.read_excel(_LUKE_PICKS_PATH)
+        import io
+        import json as _json
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+
+        creds = service_account.Credentials.from_service_account_info(
+            _json.loads(sa_json),
+            scopes=["https://www.googleapis.com/auth/drive.readonly"],
+        )
+        service = build("drive", "v3", credentials=creds, cache_discovery=False)
+
+        meta = service.files().get(fileId=file_id, fields="mimeType").execute()
+        mime = meta.get("mimeType", "")
+
+        if mime == "application/vnd.google-apps.spreadsheet":
+            raw = service.files().export(
+                fileId=file_id, mimeType="text/csv"
+            ).execute()
+            df = pd.read_csv(io.BytesIO(raw))
+        elif mime in (
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "application/vnd.ms-excel",
+        ):
+            raw = service.files().get_media(fileId=file_id).execute()
+            df = pd.read_excel(io.BytesIO(raw))
+        else:
+            raw = service.files().get_media(fileId=file_id).execute()
+            df = pd.read_csv(io.StringIO(raw.decode("utf-8")), sep=None, engine="python")
+
         for col in ("Ticker", "ticker", "Symbol"):
             if col in df.columns:
                 tickers = df[col].dropna().astype(str).str.strip().tolist()
-                logger.info(f"[Universe] LukePicks: {len(tickers)}종목")
-                return [t for t in tickers if t]
+                tickers = [t for t in tickers if t]
+                logger.info(f"[Universe] Drive LukePicks: {len(tickers)}종목")
+                return tickers
+
+        logger.warning("[Universe] Drive LukePicks: Ticker 컬럼 없음")
+        return []
+
     except Exception as e:
-        logger.warning(f"[Universe] LukePicks 로드 실패: {e}")
-    return []
+        logger.warning(f"[Universe] Drive LukePicks 로드 실패: {e}")
+        return []
 
 
 def _build_us_universe() -> list[str]:
@@ -158,7 +198,7 @@ def _build_us_universe() -> list[str]:
     raw.extend(_fetch_sp500())
     raw.extend(_fetch_nasdaq100())
     raw.extend(_fetch_dow30())
-    raw.extend(_load_luke_picks())
+    raw.extend(_load_luke_picks_from_drive())
     raw.extend(_MANUAL_US)
 
     seen: set[str] = set()
