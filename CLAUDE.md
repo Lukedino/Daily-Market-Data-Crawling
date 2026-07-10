@@ -44,6 +44,7 @@ US 주식/ETF, 크립토, KR(한국) 시장 OHLC + 재무데이터를 수집해 
 | `GDRIVE_OHLC_FOLDER_ID` | `[Database] Market Crawling Data` 폴더 ID |
 | `GOOGLE_SERVICE_ACCOUNT_JSON` | GCP Service Account JSON 키 |
 | `DART_API_KEY` | DART 재무데이터 API 키 |
+| `GDRIVE_LUKE_PICKS_FILE_ID` | US 유니버스 개인 관심종목 리스트 연동용 |
 
 ---
 
