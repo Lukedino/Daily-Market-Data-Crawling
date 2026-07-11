@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 _LOCAL_ROOT = Path(config.LOCAL_DATA_DIR) / "ohlc_db"
 _STATUS_PATH = _LOCAL_ROOT / "db_status.json"
+_PENDING_PATH = _LOCAL_ROOT / "backfill_pending.json"
 
 # Parquet 컬럼 순서 (스키마 고정)
 _SCHEMA_COLS = [
@@ -359,6 +360,73 @@ def upload_status(uploader=None):
         u.upload(str(_STATUS_PATH), remote_path)
     except Exception as e:
         logger.error(f"[OhlcDB] db_status.json 업로드 실패: {e}")
+
+
+def load_pending() -> dict:
+    """data/local/ohlc_db/backfill_pending.json 로드. 없으면 빈 dict 반환."""
+    if not _PENDING_PATH.exists():
+        return {}
+    try:
+        with open(_PENDING_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.error(f"[OhlcDB] pending 로드 실패: {e}")
+        return {}
+
+
+def save_pending(pending: dict):
+    """backfill_pending.json 저장."""
+    _PENDING_PATH.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with open(_PENDING_PATH, "w", encoding="utf-8") as f:
+            json.dump(pending, f, indent=2, ensure_ascii=False)
+        logger.debug(f"[OhlcDB] pending 저장 완료: {_PENDING_PATH}")
+    except Exception as e:
+        logger.error(f"[OhlcDB] pending 저장 실패: {e}")
+
+
+def download_pending(uploader=None) -> bool:
+    """Drive에서 backfill_pending.json 다운로드. 성공 True, 실패 False."""
+    u = _get_uploader(uploader)
+    if u is None:
+        return False
+
+    remote_path = config.DRIVE_PATHS.get("ohlc_meta")
+    if not remote_path:
+        logger.error("[OhlcDB] DRIVE_PATHS에 'ohlc_meta' 없음")
+        return False
+
+    _PENDING_PATH.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        u.download(remote_path, "backfill_pending.json", str(_PENDING_PATH))
+        return True
+    except FileNotFoundError:
+        logger.debug("[OhlcDB] Drive에 backfill_pending.json 없음 (최초 실행)")
+        return False
+    except Exception as e:
+        logger.error(f"[OhlcDB] backfill_pending.json 다운로드 실패: {e}")
+        return False
+
+
+def upload_pending(uploader=None):
+    """로컬 backfill_pending.json을 Drive에 업로드."""
+    u = _get_uploader(uploader)
+    if u is None:
+        return
+
+    remote_path = config.DRIVE_PATHS.get("ohlc_meta")
+    if not remote_path:
+        logger.error("[OhlcDB] DRIVE_PATHS에 'ohlc_meta' 없음")
+        return
+
+    if not _PENDING_PATH.exists():
+        logger.warning("[OhlcDB] backfill_pending.json 없음 → 업로드 건너뜀")
+        return
+
+    try:
+        u.upload(str(_PENDING_PATH), remote_path)
+    except Exception as e:
+        logger.error(f"[OhlcDB] backfill_pending.json 업로드 실패: {e}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
