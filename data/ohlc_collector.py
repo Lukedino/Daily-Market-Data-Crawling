@@ -317,7 +317,7 @@ def load_tickers(market: str) -> list[str]:
 # 핵심 수집 함수
 # ══════════════════════════════════════════════════════════════════════════════
 
-def fetch_ohlc_range(tickers: list[str], start: str, end: str) -> pd.DataFrame:
+def fetch_ohlc_range(tickers: list[str], start: str, end: str) -> tuple[pd.DataFrame, list[str]]:
     """
     yfinance batch download → flat DataFrame (Ticker | Date | Open | High | Low | Close | Volume)
 
@@ -466,7 +466,7 @@ def fetch_ohlc_range(tickers: list[str], start: str, end: str) -> pd.DataFrame:
 
     if not all_rows:
         logger.warning(f"[OhlcCollector] {start}~{end} 수집 결과 없음")
-        return pd.DataFrame(columns=_EXTENDED_COLS)
+        return pd.DataFrame(columns=_EXTENDED_COLS), failed
 
     result = pd.concat(all_rows, ignore_index=True)
 
@@ -481,7 +481,7 @@ def fetch_ohlc_range(tickers: list[str], start: str, end: str) -> pd.DataFrame:
         f"[OhlcCollector] 수집 완료: {start}~{end} "
         f"→ {len(result):,}행, {result['Ticker'].nunique()}종목"
     )
-    return result
+    return result, failed
 
 
 def _extract_ticker_df(raw: pd.DataFrame, ticker: str, batch_size: int) -> Optional[pd.DataFrame]:
@@ -564,7 +564,7 @@ def backfill_market(
 
         logger.info(f"[OhlcCollector] {market.upper()} {year}년 수집 중...")
         try:
-            df = fetch_ohlc_range(tickers, start_str, end_str)
+            df, _ = fetch_ohlc_range(tickers, start_str, end_str)
         except Exception as e:
             logger.error(f"[OhlcCollector] {market} {year}년 수집 실패: {e}")
             continue
@@ -775,7 +775,7 @@ def update_market(
 
     # 6. 수집
     try:
-        new_df = fetch_ohlc_range(tickers, start_str, end_str)
+        new_df, _ = fetch_ohlc_range(tickers, start_str, end_str)
     except Exception as e:
         logger.error(f"[OhlcCollector] {market} 증분 수집 실패: {e}")
         return
