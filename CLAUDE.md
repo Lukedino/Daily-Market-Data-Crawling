@@ -161,6 +161,7 @@ python scripts/verify_kr.py --drive --fix
 
 | 날짜 | 변경 내용 |
 |------|---------|
+| 2026-07-11 | **[FEAT-BACKFILL-PENDING]** 하드 실패 종목 재시도 추적 추가: `list_known_tickers()`가 "어디든 행 하나만 있으면 완료"로 오판해 TSM/ALAB/COHR/NBIS 등 일부 연도만 실패한 종목이 영구히 재시도 대상에서 빠지던 문제 해결. `ohlc_db.load/save/download/upload_pending()` (backfill_pending.json, db_status.json과 동일 패턴) + `fetch_ohlc_range()`가 하드 실패 티커 목록을 함께 반환 + `backfill_new_tickers()`가 신규 종목뿐 아니라 pending에 남은 종목도 재시도하고 결과에 따라 pending을 갱신 |
 | 2026-07-10 | **[FEAT-NEW-TICKER-BACKFILL]** US/Crypto 신규 종목 자동 백필 추가: `ohlc_db.list_known_tickers()` + `ohlc_collector.backfill_new_tickers()` 신규 함수, `run_ohlc_update()`에 자동 통합 + `ohlc-new-backfill` CLI 모드 + `ohlc-new-ticker-backfill.yml` 신규 워크플로우 |
 | 2026-05-25 | **[FEAT-KR-SUPPLEMENT]** kr-daily 누락 종목 yfinance 보완 수집 추가: FDR StockListing에서 빠진 종목 중 최근 7일 이내 거래 이력 있는 종목을 yfinance로 재시도. 상장폐지 확정 종목(7일 초과 미거래)은 자동 스킵. `kr_collector.collect_missing_today()` 신규 함수 + `main.run_kr_daily()` 3b 단계 추가 |
 | 2026-03-25 | 레포명 변경: Quant-Korea-Data → Daily-Market-Data-Crawling |

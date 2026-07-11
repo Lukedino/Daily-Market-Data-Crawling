@@ -28,7 +28,7 @@
   `download_pending(uploader=None) -> bool`, `upload_pending(uploader=None)` —
   모두 `db_status.json` 계열 함수와 동일한 시그니처/동작 패턴.
 
-- [ ] **Step 1: 스크래치 검증 스크립트 작성 (구현 전 — 실패 확인용)**
+- [x] **Step 1: 스크래치 검증 스크립트 작성 (구현 전 — 실패 확인용)**
 
 `C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_pending_storage.py` 파일을 아래 내용으로 작성한다.
 
@@ -63,12 +63,12 @@ shutil.rmtree(TMP_ROOT, ignore_errors=True)
 print("ALL OK")
 ```
 
-- [ ] **Step 2: 실행해서 실패 확인**
+- [x] **Step 2: 실행해서 실패 확인**
 
 Run: `python "C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_pending_storage.py"`
 Expected: `AttributeError: module 'data.ohlc_db' has no attribute 'load_pending'`
 
-- [ ] **Step 3: `data/ohlc_db.py` 수정**
+- [x] **Step 3: `data/ohlc_db.py` 수정**
 
 28번째 줄(`_STATUS_PATH = _LOCAL_ROOT / "db_status.json"`) 바로 다음 줄에 상수 추가:
 
@@ -148,12 +148,12 @@ def upload_pending(uploader=None):
         logger.error(f"[OhlcDB] backfill_pending.json 업로드 실패: {e}")
 ```
 
-- [ ] **Step 4: 실행해서 통과 확인**
+- [x] **Step 4: 실행해서 통과 확인**
 
 Run: `python "C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_pending_storage.py"`
 Expected: 2개 케이스 모두 `OK`, 마지막에 `ALL OK`
 
-- [ ] **Step 5: 스크래치 스크립트 삭제 후 커밋**
+- [x] **Step 5: 스크래치 스크립트 삭제 후 커밋**
 
 ```bash
 rm "/c/Users/LUKESK~1/AppData/Local/Temp/claude/C--Users-Luke-Skywalker/c1a1746b-776d-4dbc-978e-8e7d8265329c/scratchpad/test_pending_storage.py"
@@ -184,7 +184,7 @@ EOF
   (기존엔 `-> pd.DataFrame`만 반환) — 두 번째 값은 하드 실패 티커 목록.
 - Consumes: 없음 (기존 내부 `failed` 변수를 그대로 반환하는 것뿐).
 
-- [ ] **Step 1: 스크래치 검증 스크립트 작성 (구현 전 — 실패 확인용)**
+- [x] **Step 1: 스크래치 검증 스크립트 작성 (구현 전 — 실패 확인용)**
 
 `C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_fetch_ohlc_range_failed_return.py`:
 
@@ -223,12 +223,12 @@ print("OK case (b): clean empty response -> failed list empty:", failed2)
 print("ALL OK")
 ```
 
-- [ ] **Step 2: 실행해서 실패 확인**
+- [x] **Step 2: 실행해서 실패 확인**
 
 Run: `python "C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_fetch_ohlc_range_failed_return.py"`
 Expected: `TypeError: cannot unpack non-iterable DataFrame object` (현재 `fetch_ohlc_range`는 DataFrame 하나만 반환하므로 `df, failed = ...` 언패킹이 실패)
 
-- [ ] **Step 3: `data/ohlc_collector.py` 수정**
+- [x] **Step 3: `data/ohlc_collector.py` 수정**
 
 320번째 줄 함수 시그니처를:
 
@@ -284,7 +284,7 @@ def fetch_ohlc_range(tickers: list[str], start: str, end: str) -> tuple[pd.DataF
 
 (`backfill_new_tickers()` 645번째 줄의 호출부는 Task 3에서 함수 전체를 교체하며 함께 처리하므로 이 Task에서는 건드리지 않는다.)
 
-- [ ] **Step 4: 실행해서 통과 확인**
+- [x] **Step 4: 실행해서 통과 확인**
 
 Run: `python "C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_fetch_ohlc_range_failed_return.py"`
 Expected: 2개 케이스 모두 `OK`, 마지막에 `ALL OK`
@@ -294,7 +294,7 @@ Expected: 2개 케이스 모두 `OK`, 마지막에 `ALL OK`
 Run (프로젝트 루트에서): `python main.py --mode ohlc-backfill --market us --start-year 2020 --dry-run`
 Expected: 에러 없이 종료 (dry-run이므로 실제 fetch는 호출되지 않지만, 문법/임포트 오류가 없는지 확인하는 목적)
 
-- [ ] **Step 5: 스크래치 스크립트 삭제 후 커밋**
+- [x] **Step 5: 스크래치 스크립트 삭제 후 커밋**
 
 ```bash
 rm "/c/Users/LUKESK~1/AppData/Local/Temp/claude/C--Users-Luke-Skywalker/c1a1746b-776d-4dbc-978e-8e7d8265329c/scratchpad/test_fetch_ohlc_range_failed_return.py"
@@ -328,7 +328,7 @@ EOF
 - Produces (기존 시그니처 유지): `backfill_new_tickers(market, start_year=2020, upload=True) -> list[str]`
   — 반환값 의미가 "신규 종목"에서 "이번에 시도한 티커(신규+pending 재시도)"로 확장됨.
 
-- [ ] **Step 1: 스크래치 검증 스크립트 작성 (구현 전 — 실패 확인용)**
+- [x] **Step 1: 스크래치 검증 스크립트 작성 (구현 전 — 실패 확인용)**
 
 `C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_backfill_pending_retry.py`:
 
@@ -414,12 +414,12 @@ print("OK case (b): fully successful ticker removed from pending:", result2, sav
 print("ALL OK")
 ```
 
-- [ ] **Step 2: 실행해서 실패 확인**
+- [x] **Step 2: 실행해서 실패 확인**
 
 Run: `python "C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_backfill_pending_retry.py"`
 Expected: `AssertionError: FAIL case(a): known-but-pending ticker not retried: []` (현재 코드는 `known`이면 무조건 제외하므로 TSM이 candidates에서 빠짐)
 
-- [ ] **Step 3: `data/ohlc_collector.py`의 `backfill_new_tickers()` 전체 교체**
+- [x] **Step 3: `data/ohlc_collector.py`의 `backfill_new_tickers()` 전체 교체**
 
 596번째 줄부터 700번째 줄까지의 함수 전체를 아래로 교체한다:
 
@@ -561,7 +561,7 @@ def backfill_new_tickers(
     return candidates
 ```
 
-- [ ] **Step 4: 실행해서 통과 확인**
+- [x] **Step 4: 실행해서 통과 확인**
 
 Run: `python "C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_backfill_pending_retry.py"`
 Expected: 2개 케이스 모두 `OK`, 마지막에 `ALL OK`
@@ -574,7 +574,7 @@ Expected: `[DryRun] US 신규 종목 백필 시뮬레이션` 출력, 에러 없�
 Run (프로젝트 루트에서): `python main.py --mode ohlc-update --market all --dry-run`
 Expected: 에러 없이 종료 (Task 2의 튜플 언패킹 변경이 `update_market()` 경로에서도 깨지지 않는지 확인)
 
-- [ ] **Step 5: 스크래치 스크립트 삭제 후 커밋**
+- [x] **Step 5: 스크래치 스크립트 삭제 후 커밋**
 
 ```bash
 rm "/c/Users/LUKESK~1/AppData/Local/Temp/claude/C--Users-Luke-Skywalker/c1a1746b-776d-4dbc-978e-8e7d8265329c/scratchpad/test_backfill_pending_retry.py"
