@@ -25,6 +25,11 @@ from typing import Optional
 import pandas as pd
 import requests
 
+try:
+    from yfinance.exceptions import YFRateLimitError
+except ImportError:
+    YFRateLimitError = None
+
 logger = logging.getLogger(__name__)
 
 # ── 파일 override 경로 ────────────────────────────────────────────────────────
@@ -54,6 +59,9 @@ _MANUAL_CRYPTO = [
 ]
 
 _BATCH_SIZE = 50   # yfinance rate limit 방지
+_BATCH_MAX_RETRIES = 3
+_RATE_LIMIT_BACKOFF_SECONDS = [30, 60, 120]
+_GENERIC_RETRY_BACKOFF_SECONDS = [5, 10, 20]
 _CMC_TOP_N  = 200  # CoinMarketCap 상위 N개
 
 # ── ETF 판별 세트 (Market 태그용) ─────────────────────────────────────────────
@@ -345,23 +353,46 @@ def fetch_ohlc_range(tickers: list[str], start: str, end: str) -> pd.DataFrame:
             f"({len(batch)}종목, {start}~{end})"
         )
 
-        try:
-            raw = yf.download(
-                batch,
-                start=start,
-                end=end,
-                auto_adjust=True,
-                progress=False,
-                group_by="ticker",
-                threads=True,
-            )
-        except Exception as e:
-            logger.warning(f"[OhlcCollector] 배치 {batch_no} 다운로드 실패: {e}")
-            failed.extend(batch)
-            time.sleep(2.0)
+        raw = None
+        for attempt in range(_BATCH_MAX_RETRIES + 1):
+            try:
+                raw = yf.download(
+                    batch,
+                    start=start,
+                    end=end,
+                    auto_adjust=True,
+                    progress=False,
+                    group_by="ticker",
+                    threads=True,
+                )
+                break
+            except Exception as e:
+                is_rate_limit = (
+                    YFRateLimitError is not None and isinstance(e, YFRateLimitError)
+                )
+                if attempt >= _BATCH_MAX_RETRIES:
+                    logger.warning(
+                        f"[OhlcCollector] 배치 {batch_no} 다운로드 실패 "
+                        f"(재시도 {_BATCH_MAX_RETRIES}회 모두 소진): {e}"
+                    )
+                    failed.extend(batch)
+                    raw = None
+                    break
+                backoff = (
+                    _RATE_LIMIT_BACKOFF_SECONDS if is_rate_limit
+                    else _GENERIC_RETRY_BACKOFF_SECONDS
+                )[attempt]
+                kind = "rate limit" if is_rate_limit else "일시적 오류"
+                logger.warning(
+                    f"[OhlcCollector] 배치 {batch_no} 다운로드 실패({kind}): {e} "
+                    f"— {backoff}초 후 재시도 ({attempt + 1}/{_BATCH_MAX_RETRIES})"
+                )
+                time.sleep(backoff)
+
+        if raw is None:
             continue
 
-        if raw is None or raw.empty:
+        if raw.empty:
             logger.warning(f"[OhlcCollector] 배치 {batch_no} 빈 응답")
             continue
 
