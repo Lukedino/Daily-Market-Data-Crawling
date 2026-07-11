@@ -19,7 +19,7 @@ on:
 jobs:
   update:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60   # yfinance 배치 재시도(백오프) 최악의 경우 대비 여유 확보
 
     steps:
       - uses: actions/checkout@v4
