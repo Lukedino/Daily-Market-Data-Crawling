@@ -134,11 +134,18 @@ def _fetch_dow30() -> list[str]:
     return []
 
 
+_US_CATEGORY_VALUES = {"미국", "ETF"}
+
+
 def _load_luke_picks_from_drive() -> list[str]:
     """
-    Google Drive에서 개인 관심종목 리스트(단순 Ticker 컬럼)를 다운로드하여 파싱.
+    Google Drive에서 개인 관심종목 리스트를 다운로드하여 파싱.
     GOOGLE_SERVICE_ACCOUNT_JSON + GDRIVE_LUKE_PICKS_FILE_ID 둘 다 있어야 동작.
     둘 중 하나라도 없거나 실패하면 조용히 빈 리스트 반환 (필수 기능 아님).
+
+    "구분"(시장분류) 컬럼이 있으면 미국/ETF로 분류된 행만 추출한다
+    (Portfolio_ATR_Monitor의 Portfolio.xlsx와 동일 스키마 재사용 지원).
+    구분 컬럼이 없으면 단순 티커 리스트로 간주해 전체를 사용한다.
     """
     import os
 
@@ -176,6 +183,9 @@ def _load_luke_picks_from_drive() -> list[str]:
         else:
             raw = service.files().get_media(fileId=file_id).execute()
             df = pd.read_csv(io.StringIO(raw.decode("utf-8")), sep=None, engine="python")
+
+        if "구분" in df.columns:
+            df = df[df["구분"].astype(str).str.strip().isin(_US_CATEGORY_VALUES)]
 
         for col in ("Ticker", "ticker", "Symbol"):
             if col in df.columns:
