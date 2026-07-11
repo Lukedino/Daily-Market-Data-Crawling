@@ -599,8 +599,13 @@ def backfill_new_tickers(
     upload: bool = True,
 ) -> list[str]:
     """
-    현재 유니버스에서 지금까지 한 번도 수집되지 않은 신규 종목을 찾아
+    현재 유니버스에서 아직 완전히 백필되지 않은 종목(한 번도 수집된 적 없는
+    신규 종목 + 이전 실행에서 일부 연도가 실패해 pending으로 남은 종목)을 찾아
     start_year ~ 올해까지 과거 이력을 백필한다.
+
+    "완전히 백필됨"의 기준은 하드 실패(레이트리밋 등으로 재시도까지 소진)가
+    한 번도 없었는지이다. 정상적인 빈 응답(상장 전 등, 예외 없이 빈 결과)은
+    실패로 치지 않으므로 pending에 남지 않는다.
 
     Args:
         market:     "us" 또는 "crypto"
@@ -608,27 +613,35 @@ def backfill_new_tickers(
         upload:     True면 연도별 저장 후 Drive 업로드
 
     Returns:
-        새로 발견되어 백필된 티커 목록 (없으면 빈 리스트)
+        이번에 시도한 티커 목록 (신규 + pending 재시도, 없으면 빈 리스트)
     """
     from data import ohlc_db
 
     ohlc_db.download_all_years(market)
     ohlc_db.download_status()
+    ohlc_db.download_pending()
 
     known = ohlc_db.list_known_tickers(market)
+    pending = set(ohlc_db.load_pending().get(market, []))
     universe = load_tickers(market)
-    new_tickers = [t for t in universe if t not in known]
+    candidates = [
+        t for t in universe if t not in known or t in pending
+    ]
 
-    if not new_tickers:
-        logger.info(f"[NewTickerBackfill] {market.upper()} 신규 종목 없음")
+    if not candidates:
+        logger.info(f"[NewTickerBackfill] {market.upper()} 신규/미완료 종목 없음")
         return []
 
+    new_count = len(candidates) - len(pending & set(candidates))
+    retry_count = len(pending & set(candidates))
     logger.info(
-        f"[NewTickerBackfill] {market.upper()} 신규 종목 {len(new_tickers)}개 발견: {new_tickers}"
+        f"[NewTickerBackfill] {market.upper()} 백필 대상 {len(candidates)}개 "
+        f"(신규 {new_count}개, 미완료 재시도 {retry_count}개): {candidates}"
     )
 
     current_year = date.today().year
     all_dates: list[date] = []
+    ticker_failed: set[str] = set()
 
     for year in range(start_year, current_year + 1):
         start_str = f"{year}-01-01"
@@ -639,13 +652,16 @@ def backfill_new_tickers(
 
         logger.info(
             f"[NewTickerBackfill] {market.upper()} {year}년 수집 중... "
-            f"({len(new_tickers)}종목)"
+            f"({len(candidates)}종목)"
         )
         try:
-            df = fetch_ohlc_range(new_tickers, start_str, end_str)
+            df, failed_tickers = fetch_ohlc_range(candidates, start_str, end_str)
         except Exception as e:
             logger.error(f"[NewTickerBackfill] {market} {year}년 수집 실패: {e}")
+            ticker_failed.update(candidates)
             continue
+
+        ticker_failed.update(failed_tickers)
 
         if df.empty:
             logger.warning(f"[NewTickerBackfill] {market} {year}년 데이터 없음")
@@ -664,6 +680,17 @@ def backfill_new_tickers(
 
         if upload:
             ohlc_db.upload_years(market, [year])
+
+    all_pending = ohlc_db.load_pending()
+    all_pending[market] = sorted(ticker_failed)
+    ohlc_db.save_pending(all_pending)
+    if upload:
+        ohlc_db.upload_pending()
+    if ticker_failed:
+        logger.info(
+            f"[NewTickerBackfill] {market.upper()} 다음 실행에 재시도할 "
+            f"미완료 종목 {len(ticker_failed)}개: {sorted(ticker_failed)}"
+        )
 
     if all_dates:
         status = ohlc_db.load_status()
@@ -699,8 +726,8 @@ def backfill_new_tickers(
         if upload:
             ohlc_db.upload_status()
 
-    logger.info(f"[NewTickerBackfill] {market.upper()} 신규 종목 백필 완료: {new_tickers}")
-    return new_tickers
+    logger.info(f"[NewTickerBackfill] {market.upper()} 백필 완료: {candidates}")
+    return candidates
 
 
 # ══════════════════════════════════════════════════════════════════════════════
