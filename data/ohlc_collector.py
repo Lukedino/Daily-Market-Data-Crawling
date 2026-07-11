@@ -143,6 +143,7 @@ def _fetch_dow30() -> list[str]:
 
 
 _US_CATEGORY_VALUES = {"미국", "ETF"}
+_KR_TICKER_PATTERN = re.compile(r"^\d{6}\.(KS|KQ)$", re.IGNORECASE)
 
 
 def _load_luke_picks_from_drive() -> list[str]:
@@ -153,7 +154,9 @@ def _load_luke_picks_from_drive() -> list[str]:
 
     "구분"(시장분류) 컬럼이 있으면 미국/ETF로 분류된 행만 추출한다
     (Portfolio_ATR_Monitor의 Portfolio.xlsx와 동일 스키마 재사용 지원).
-    구분 컬럼이 없으면 단순 티커 리스트로 간주해 전체를 사용한다.
+    구분 컬럼이 없으면 단순 티커 리스트로 간주하되, "6자리숫자.KS"/".KQ"
+    형식의 한국 종목 코드는 티커 값 자체로 판별해 제외한다
+    (실제 사용자 파일은 구분 컬럼 없이 이 형식으로 한국 종목을 구분함).
     """
     import os
 
@@ -198,7 +201,10 @@ def _load_luke_picks_from_drive() -> list[str]:
         for col in ("Ticker", "ticker", "Symbol"):
             if col in df.columns:
                 tickers = df[col].dropna().astype(str).str.strip().tolist()
-                tickers = [t for t in tickers if t]
+                tickers = [
+                    t for t in tickers
+                    if t and not _KR_TICKER_PATTERN.match(t)
+                ]
                 logger.info(f"[Universe] Drive LukePicks: {len(tickers)}종목")
                 return tickers
 
