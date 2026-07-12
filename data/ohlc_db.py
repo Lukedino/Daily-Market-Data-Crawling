@@ -94,6 +94,34 @@ def list_known_tickers(market: str) -> set[str]:
     return known
 
 
+def first_seen_dates(market: str) -> dict[str, date]:
+    """
+    로컬 연도별 parquet 파일들({market}_YYYY.parquet)에서
+    티커별 최초 수집일(Date의 최솟값)을 반환.
+    """
+    mdir = local_dir(market)
+    if not mdir.exists():
+        return {}
+
+    year_pattern = re.compile(rf"^{re.escape(market)}_\d{{4}}\.parquet$")
+    first_dates: dict[str, date] = {}
+
+    for pfile in sorted(mdir.glob(f"{market}_*.parquet")):
+        if not year_pattern.match(pfile.name):
+            continue
+        try:
+            table = pq.read_table(str(pfile), columns=["Ticker", "Date"])
+            df = table.to_pandas()
+            df["Date"] = pd.to_datetime(df["Date"]).dt.date
+            for ticker, d in df.groupby("Ticker")["Date"].min().items():
+                if ticker not in first_dates or d < first_dates[ticker]:
+                    first_dates[ticker] = d
+        except Exception as e:
+            logger.warning(f"[OhlcDB] {pfile.name} Ticker/Date 읽기 실패: {e}")
+
+    return first_dates
+
+
 def save_year(df: pd.DataFrame, market: str, year: int):
     """
     연도별 Parquet 저장.
