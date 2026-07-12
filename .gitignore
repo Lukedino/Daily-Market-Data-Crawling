@@ -31,3 +31,6 @@ build/
 *.swp
 *.swo
 .DS_Store
+
+# ── Claude Code worktrees ──────────────────────────────────────
+.claude/worktrees/
