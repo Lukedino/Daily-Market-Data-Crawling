@@ -53,7 +53,7 @@ def analyze_market(market: str, after: date) -> dict:
 # 출력
 # ══════════════════════════════════════════════════════════════════════════════
 
-def print_report(results: list[dict], after: date):
+def print_report(results: list[dict], after: date, market_arg: str, after_arg: str):
     print()
     print("=" * 60)
     print("  US/Crypto 백필 완결성 검증")
@@ -84,7 +84,7 @@ def print_report(results: list[dict], after: date):
 
     if total_new:
         print(f"\n  [보완 안내] 신규 후보 {total_new}개 발견")
-        print("  python scripts/verify_ohlc.py --fix  # pending에 반영")
+        print(f"  python scripts/verify_ohlc.py --market {market_arg} --after {after_arg} --drive --fix  # pending에 반영")
     else:
         print("\n  ✅ 신규 후보 없음")
 
@@ -146,7 +146,7 @@ def main():
     )
     parser.add_argument(
         "--fix", action="store_true",
-        help="신규 후보를 backfill_pending.json에 반영 (Drive 업로드 포함, 실제 fetch는 안 함)"
+        help="신규 후보를 backfill_pending.json에 반영 (--drive 와 함께 사용 권장, Drive 업로드 포함)"
     )
     args = parser.parse_args()
 
@@ -176,7 +176,7 @@ def main():
     if not results:
         return
 
-    print_report(results, after)
+    print_report(results, after, args.market, args.after)
 
     if args.fix:
         apply_fix(results)
