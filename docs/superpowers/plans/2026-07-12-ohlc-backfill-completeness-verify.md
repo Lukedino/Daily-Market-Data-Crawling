@@ -43,7 +43,7 @@
 - Consumes: 없음 (기존 `local_dir()`, `re`, `pd`, `pq`, `logger`를 그대로 사용 —
   전부 이미 `data/ohlc_db.py` 상단에 임포트되어 있음).
 
-- [ ] **Step 1: 스크래치 검증 스크립트 작성 (구현 전 — 실패 확인용)**
+- [x] **Step 1: 스크래치 검증 스크립트 작성 (구현 전 — 실패 확인용)**
 
 `C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\fc92b968-9d81-4ad8-b785-85992094b4aa\scratchpad\test_first_seen_dates.py` 파일을 아래 내용으로 작성한다.
 
@@ -89,12 +89,12 @@ shutil.rmtree(TMP_ROOT, ignore_errors=True)
 print("ALL OK")
 ```
 
-- [ ] **Step 2: 실행해서 실패 확인**
+- [x] **Step 2: 실행해서 실패 확인**
 
 Run: `python "C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\fc92b968-9d81-4ad8-b785-85992094b4aa\scratchpad\test_first_seen_dates.py"`
 Expected: `AttributeError: module 'data.ohlc_db' has no attribute 'first_seen_dates'`
 
-- [ ] **Step 3: `data/ohlc_db.py`에 함수 추가**
+- [x] **Step 3: `data/ohlc_db.py`에 함수 추가**
 
 94번째 줄(`list_known_tickers()`의 `return known` 다음, 빈 줄 두 개 뒤)과
 97번째 줄(`def save_year(`) 사이에 아래 함수를 추가한다:
@@ -128,12 +128,12 @@ def first_seen_dates(market: str) -> dict[str, date]:
     return first_dates
 ```
 
-- [ ] **Step 4: 실행해서 통과 확인**
+- [x] **Step 4: 실행해서 통과 확인**
 
 Run: `python "C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\fc92b968-9d81-4ad8-b785-85992094b4aa\scratchpad\test_first_seen_dates.py"`
 Expected: `OK: {...}` 출력 후 `ALL OK`
 
-- [ ] **Step 5: 스크래치 스크립트 삭제 후 커밋**
+- [x] **Step 5: 스크래치 스크립트 삭제 후 커밋**
 
 ```bash
 rm "/c/Users/LUKESK~1/AppData/Local/Temp/claude/C--Users-Luke-Skywalker/fc92b968-9d81-4ad8-b785-85992094b4aa/scratchpad/test_first_seen_dates.py"
@@ -172,7 +172,7 @@ EOF
   "first_dates": dict[str, date]}`. Task 3의 `--fix` 로직이 이 반환값의
   `"market"`/`"new"` 키를 그대로 사용한다.
 
-- [ ] **Step 1: 스크래치 검증 스크립트 작성 (구현 전 — 실패 확인용)**
+- [x] **Step 1: 스크래치 검증 스크립트 작성 (구현 전 — 실패 확인용)**
 
 `C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\fc92b968-9d81-4ad8-b785-85992094b4aa\scratchpad\test_verify_ohlc_report.py`:
 
@@ -203,12 +203,12 @@ print("OK:", result)
 print("ALL OK")
 ```
 
-- [ ] **Step 2: 실행해서 실패 확인**
+- [x] **Step 2: 실행해서 실패 확인**
 
 Run: `python "C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\fc92b968-9d81-4ad8-b785-85992094b4aa\scratchpad\test_verify_ohlc_report.py"`
 Expected: `ModuleNotFoundError: No module named 'verify_ohlc'`
 
-- [ ] **Step 3: `scripts/verify_ohlc.py` 작성**
+- [x] **Step 3: `scripts/verify_ohlc.py` 작성**
 
 ```python
 """
@@ -357,7 +357,7 @@ if __name__ == "__main__":
     main()
 ```
 
-- [ ] **Step 4: 실행해서 통과 확인**
+- [x] **Step 4: 실행해서 통과 확인**
 
 Run: `python "C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\fc92b968-9d81-4ad8-b785-85992094b4aa\scratchpad\test_verify_ohlc_report.py"`
 Expected: `OK: {...}` 출력 후 `ALL OK`
@@ -369,7 +369,7 @@ Run: `python scripts/verify_ohlc.py --market us`
 Expected: 에러 없이 종료, `[US]` 섹션과 요약 출력 (로컬에 `data/local/ohlc_db/us/` 폴더가
 없으면 "로컬 us 폴더 없음" 안내만 출력되고 그것도 정상 종료임)
 
-- [ ] **Step 5: 스크래치 스크립트 삭제 후 커밋**
+- [x] **Step 5: 스크래치 스크립트 삭제 후 커밋**
 
 ```bash
 rm "/c/Users/LUKESK~1/AppData/Local/Temp/claude/C--Users-Luke-Skywalker/fc92b968-9d81-4ad8-b785-85992094b4aa/scratchpad/test_verify_ohlc_report.py"
@@ -405,7 +405,7 @@ EOF
 - Produces: `apply_fix(results: list[dict])` — 반환값 없음, `backfill_pending.json`을
   갱신하고 Drive에 업로드하는 부수효과만 있음.
 
-- [ ] **Step 1: 스크래치 검증 스크립트 작성 (구현 전 — 실패 확인용)**
+- [x] **Step 1: 스크래치 검증 스크립트 작성 (구현 전 — 실패 확인용)**
 
 `C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\fc92b968-9d81-4ad8-b785-85992094b4aa\scratchpad\test_verify_ohlc_fix.py`:
 
@@ -440,12 +440,12 @@ print("OK:", saved)
 print("ALL OK")
 ```
 
-- [ ] **Step 2: 실행해서 실패 확인**
+- [x] **Step 2: 실행해서 실패 확인**
 
 Run: `python "C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\fc92b968-9d81-4ad8-b785-85992094b4aa\scratchpad\test_verify_ohlc_fix.py"`
 Expected: `AttributeError: module 'verify_ohlc' has no attribute 'apply_fix'`
 
-- [ ] **Step 3: `scripts/verify_ohlc.py`에 `apply_fix()` 추가 + `main()` 배선**
+- [x] **Step 3: `scripts/verify_ohlc.py`에 `apply_fix()` 추가 + `main()` 배선**
 
 `print_report` 함수 정의와 `# ══...` "메인" 구분선 사이에 아래 함수를 추가한다:
 
@@ -503,7 +503,7 @@ def apply_fix(results: list[dict]):
         apply_fix(results)
 ```
 
-- [ ] **Step 4: 실행해서 통과 확인**
+- [x] **Step 4: 실행해서 통과 확인**
 
 Run: `python "C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\fc92b968-9d81-4ad8-b785-85992094b4aa\scratchpad\test_verify_ohlc_fix.py"`
 Expected: `OK: {...}` 출력 후 `ALL OK`
@@ -514,7 +514,7 @@ Expected: `OK: {...}` 출력 후 `ALL OK`
 Run: `python scripts/verify_ohlc.py --market us --help`
 Expected: `--fix` 옵션이 도움말에 나열되고 에러 없이 종료
 
-- [ ] **Step 5: 스크래치 스크립트 삭제 후 커밋**
+- [x] **Step 5: 스크래치 스크립트 삭제 후 커밋**
 
 ```bash
 rm "/c/Users/LUKESK~1/AppData/Local/Temp/claude/C--Users-Luke-Skywalker/fc92b968-9d81-4ad8-b785-85992094b4aa/scratchpad/test_verify_ohlc_fix.py"

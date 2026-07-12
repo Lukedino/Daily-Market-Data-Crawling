@@ -161,6 +161,7 @@ python scripts/verify_kr.py --drive --fix
 
 | 날짜 | 변경 내용 |
 |------|---------|
+| 2026-07-12 | **[FEAT-VERIFY-OHLC]** 백필 완결성 진단 스크립트 추가: `[FEAT-NEW-TICKER-BACKFILL]` 도입 이전(2026-07-10 이전)에 유니버스에 추가된 종목은 자동 백필 없이 daily 증분만으로 데이터가 쌓여 "known"인데 2020년 이력이 없는 경우가 다수 발견됨(DNLI/EDIT/KRYS 등 23종목). `ohlc_db.first_seen_dates()`(티커별 최초 수집일) + `scripts/verify_ohlc.py`(`--market`/`--after`/`--drive`로 리포트, `--fix`로 `backfill_pending.json`에 병합) 추가 — `verify_kr.py`와 동일하게 수동 실행 진단 도구, 실제 fetch는 기존 `backfill_new_tickers()`에 위임 |
 | 2026-07-11 | **[FEAT-BACKFILL-PENDING]** 하드 실패 종목 재시도 추적 추가: `list_known_tickers()`가 "어디든 행 하나만 있으면 완료"로 오판해 TSM/ALAB/COHR/NBIS 등 일부 연도만 실패한 종목이 영구히 재시도 대상에서 빠지던 문제 해결. `ohlc_db.load/save/download/upload_pending()` (backfill_pending.json, db_status.json과 동일 패턴) + `fetch_ohlc_range()`가 하드 실패 티커 목록을 함께 반환 + `backfill_new_tickers()`가 신규 종목뿐 아니라 pending에 남은 종목도 재시도하고 결과에 따라 pending을 갱신 |
 | 2026-07-10 | **[FEAT-NEW-TICKER-BACKFILL]** US/Crypto 신규 종목 자동 백필 추가: `ohlc_db.list_known_tickers()` + `ohlc_collector.backfill_new_tickers()` 신규 함수, `run_ohlc_update()`에 자동 통합 + `ohlc-new-backfill` CLI 모드 + `ohlc-new-ticker-backfill.yml` 신규 워크플로우 |
 | 2026-05-25 | **[FEAT-KR-SUPPLEMENT]** kr-daily 누락 종목 yfinance 보완 수집 추가: FDR StockListing에서 빠진 종목 중 최근 7일 이내 거래 이력 있는 종목을 yfinance로 재시도. 상장폐지 확정 종목(7일 초과 미거래)은 자동 스킵. `kr_collector.collect_missing_today()` 신규 함수 + `main.run_kr_daily()` 3b 단계 추가 |
