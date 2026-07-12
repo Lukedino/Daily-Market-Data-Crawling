@@ -92,6 +92,41 @@ def print_report(results: list[dict], after: date):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# pending 반영 (--fix)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def apply_fix(results: list[dict]):
+    """
+    각 시장의 신규 후보("new")를 backfill_pending.json에 병합하고 Drive에 업로드한다.
+    기존 pending 항목은 지우지 않고 합집합으로 합친다. 실제 fetch는 하지 않는다.
+    """
+    any_added = False
+
+    for r in results:
+        market = r["market"]
+        new = r["new"]
+        if not new:
+            continue
+
+        all_pending = ohlc_db.load_pending()
+        merged = sorted(set(all_pending.get(market, [])) | set(new))
+        all_pending[market] = merged
+        ohlc_db.save_pending(all_pending)
+        ohlc_db.upload_pending()
+
+        print(f"  [{market.upper()}] pending에 {len(new)}개 추가 → 총 {len(merged)}개")
+        any_added = True
+
+    if any_added:
+        print(
+            "\npending 반영 완료 — ohlc-new-ticker-backfill 워크플로우를 "
+            "실행하면 다음 회차에 자동 재시도됩니다."
+        )
+    else:
+        print("\n반영할 신규 후보 없음")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # 메인
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -108,6 +143,10 @@ def main():
     parser.add_argument(
         "--drive", action="store_true",
         help="Drive에서 최신 parquet + backfill_pending.json 다운로드 후 검증"
+    )
+    parser.add_argument(
+        "--fix", action="store_true",
+        help="신규 후보를 backfill_pending.json에 반영 (Drive 업로드 포함, 실제 fetch는 안 함)"
     )
     args = parser.parse_args()
 
@@ -138,6 +177,9 @@ def main():
         return
 
     print_report(results, after)
+
+    if args.fix:
+        apply_fix(results)
 
 
 if __name__ == "__main__":
