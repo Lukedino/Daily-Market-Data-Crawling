@@ -55,6 +55,7 @@ US 주식/ETF, 크립토, KR(한국) 시장 OHLC + 재무데이터를 수집해 
 | `kr-daily.yml` | 평일 UTC 07:30 (KST 16:30) | KR 일별 스냅샷 수집 + 자동 갭 보정 |
 | `kr-backfill.yml` | workflow_dispatch | KR 누락 구간 과거 수집 |
 | `ohlc-daily.yml` | 월~토 UTC 22:00 (KST 07:00) | US/Crypto OHLC 일별 수집 |
+| `ohlc-daily.yml` | **매일 UTC 00:30 (KST 09:30)** | **Crypto 전용** — 일봉 마감(UTC 00:00) 직후 확정 캔들 수집 |
 | `ohlc-backfill.yml` | workflow_dispatch | US/Crypto OHLC 과거 수집 |
 | `ohlc-new-ticker-backfill.yml` | workflow_dispatch | 유니버스에 새로 추가된 종목만 골라 과거 이력 백필 (daily에도 자동 통합됨) |
 | `financials-update.yml` | 자동 | US 재무데이터 수집 |
@@ -161,6 +162,7 @@ python scripts/verify_kr.py --drive --fix
 
 | 날짜 | 변경 내용 |
 |------|---------|
+| 2026-08-12 | **[FEAT-CRYPTO-CRON]** `ohlc-daily.yml`에 UTC 00:30 크립토 전용 크론 추가. `[BUG-PARTIAL-CANDLE]` 수정 이후에도 parquet의 마지막 행은 항상 진행 중인 오늘 캔들이라(`end = today + 1`로 조회), 22:00 UTC 실행만으로는 D일 캔들이 확정값으로 반영되는 시점이 D+1일 22:00 UTC — 마감 후 22시간 지연이었음. 00:30 UTC 크론으로 지연을 약 30분으로 단축. `github.event.schedule`로 크론을 구분해 `--market crypto`로 고정하며, workflow_dispatch는 `github.event.schedule`이 빈 값이라 기존처럼 `inputs.market`이 그대로 쓰인다. 크립토는 주말에도 거래되므로 요일 제한 없이 매일 실행. 부수: `inputs`를 env로 옮기고 `${{ inputs.dry_run \|\| 'false' }} && ...`를 `[ "$DRY_RUN" = "true" ] && ...`로 교체 |
 | 2026-08-12 | **[BUG-PARTIAL-CANDLE]** 크립토 일봉이 전부 미완성 캔들로 저장되던 문제 수정. 크립토 일봉 마감은 UTC 00:00인데 `ohlc-daily.yml`은 UTC 22:00에 돌아 수집 시점에 당일 캔들이 2시간 남은 진행 중 상태였고(Close=22시 시점 가격, High/Low 마지막 2시간 누락, Volume ~92%), `update_market()`이 `last_updated`를 그 날짜로 올려버려 다음 실행은 그 다음날부터 조회 → 미완성 값이 영구 확정되었음. `market == "crypto"`일 때 수집 커서를 하루 물려(`start_date = last_date`) 직전 수집일을 재조회, `save_year()`의 `(Ticker, Date)` `keep="last"` 중복제거로 확정값이 덮어씀. US는 장마감(UTC 20~21시)이 크롤 시각보다 앞서 캔들이 이미 확정이라 기존 동작 유지. 실증: `yf.download('BTC-USD')`는 UTC 08:41 시점에도 당일 캔들을 반환하나 `NVDA`는 반환하지 않음 |
 | 2026-08-12 | **[BUG-CRYPTO-SUFFIX]** 숫자 접미사 크립토 티커가 조용히 누락되던 문제 수정. Yahoo는 신규/동명 코인에 숫자 접미사를 붙이는데(`HYPE-USD` 미존재, `HYPE32196-USD`로만 조회) `yf.download()`는 exact match만 하고 빈 응답은 예외가 아니라 `failed` 목록에도 안 남아 무징후로 사라졌음. `_search_crypto_yahoo_ticker()`(`yf.Search` + `^{SYMBOL}\d*-USD$` 정규식, 프로세스 캐시) + `_retry_crypto_with_search()` 추가, `fetch_ohlc_range()`가 배치 후 빈 응답 `-USD` 종목만 골라 재탐색·재수집. **저장되는 Ticker 값은 원래 이름(`HYPE-USD`)을 유지** — parquet의 Ticker가 유니버스와 달라지면 소비 측(Trading-AI-Pipeline `CustomChartFetcher` 등)이 종목을 못 찾음. Mr.Stock-Market-Crawler `step4_ohlc_atr_core.py`의 동일 대응을 이식. 검증: `HYPE-USD` 42행 복구 확인 |
 | 2026-07-12 | **[FEAT-VERIFY-OHLC]** 백필 완결성 진단 스크립트 추가: `[FEAT-NEW-TICKER-BACKFILL]` 도입 이전(2026-07-10 이전)에 유니버스에 추가된 종목은 자동 백필 없이 daily 증분만으로 데이터가 쌓여 "known"인데 2020년 이력이 없는 경우가 다수 발견됨(DNLI/EDIT/KRYS 등 23종목). `ohlc_db.first_seen_dates()`(티커별 최초 수집일) + `scripts/verify_ohlc.py`(`--market`/`--after`/`--drive`로 리포트, `--fix`로 `backfill_pending.json`에 병합) 추가 — `verify_kr.py`와 동일하게 수동 실행 진단 도구, 실제 fetch는 기존 `backfill_new_tickers()`에 위임 |

@@ -4,6 +4,12 @@ on:
   schedule:
     # 매일 22:00 UTC (07:00 KST) — 미국 장마감(16:00 ET = 06:00 KST) 후
     - cron: '0 22 * * 1-6'
+    # 매일 00:30 UTC (09:30 KST) — 크립토 일봉 마감(UTC 00:00) 직후, crypto 전용.
+    # 크립토는 24/7이라 위 22:00 UTC 실행 시점엔 당일 캔들이 아직 2시간 남은
+    # 진행 중 상태다. 이 크론이 없으면 D일 캔들이 확정값으로 Drive에 반영되는
+    # 시점이 D+1일 22:00 UTC — 마감 후 22시간 지연이라 EOD 전략에 쓸 수 없다.
+    # 주말에도 거래되므로 요일 제한 없이 매일 실행한다.
+    - cron: '30 0 * * *'
   workflow_dispatch:
     inputs:
       market:
@@ -31,13 +37,25 @@ jobs:
         run: pip install -r requirements.txt
       - name: OHLC Daily Update
         env:
+          # 00:30 UTC 크론은 크립토 확정 캔들 전용이라 market을 crypto로 고정한다.
+          # workflow_dispatch로 돌리면 github.event.schedule이 빈 값이므로
+          # 사용자가 고른 inputs.market이 그대로 쓰인다.
+          SCHEDULE:                    ${{ github.event.schedule }}
+          INPUT_MARKET:                ${{ inputs.market || 'all' }}
+          DRY_RUN:                     ${{ inputs.dry_run || 'false' }}
           GDRIVE_FOLDER_ID:            ${{ secrets.GDRIVE_FOLDER_ID }}
           GDRIVE_OHLC_FOLDER_ID:       ${{ secrets.GDRIVE_OHLC_FOLDER_ID }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_APPLICATION_CREDENTIALS }}
           GDRIVE_LUKE_PICKS_FILE_ID:   ${{ secrets.GDRIVE_LUKE_PICKS_FILE_ID }}
         run: |
-          ARGS="--mode ohlc-update --upload-drive --market ${{ inputs.market || 'all' }}"
-          ${{ inputs.dry_run || 'false' }} && ARGS="$ARGS --dry-run"
+          if [ "$SCHEDULE" = "30 0 * * *" ]; then
+            MARKET=crypto
+          else
+            MARKET="$INPUT_MARKET"
+          fi
+          echo "실행 대상 시장: $MARKET (schedule='$SCHEDULE')"
+          ARGS="--mode ohlc-update --upload-drive --market $MARKET"
+          [ "$DRY_RUN" = "true" ] && ARGS="$ARGS --dry-run"
           python main.py $ARGS
       - name: Upload log
         if: always()
