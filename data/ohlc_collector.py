@@ -371,22 +371,59 @@ def _finalize_ticker_frame(df_t: pd.DataFrame, label: str) -> Optional[pd.DataFr
 
 
 # ── 크립토 티커 충돌 보정 ─────────────────────────────────────────────────────
-# Yahoo는 신규/동명 코인을 구분하려고 심볼에 숫자 접미사를 붙인다
+# Yahoo는 심볼이 겹치는 코인을 구분하려고 숫자 접미사를 붙인다
 # (예: HYPE-USD는 존재하지 않고 HYPE32196-USD로만 조회됨).
 # yf.download()는 exact match만 하므로 이런 종목은 예외도 없이 빈 응답이 되어
-# failed 목록에도 안 남고 조용히 누락된다 — Mr.Stock-Market-Crawler는
-# step4_ohlc_atr_core._search_crypto_yahoo_ticker()로 이미 대응하고 있어
-# 동일한 정규식/우선순위를 여기에도 이식한다.
+# failed 목록에도 안 남고 조용히 누락된다.
+#
+# 이 접미사는 CoinMarketCap id와 일치한다 (2026-08-12 전수 확인:
+# APT21794 / GRT6719 / COMP5692 / POL28321 / PI35697 / HYPE32196 — CMC id와 6/6 일치).
+# 유니버스를 CMC에서 받아오므로 id를 이미 갖고 있어 검색 없이 티커를 직접 구성할 수 있다.
 _crypto_symbol_cache: dict[str, Optional[str]] = {}
+_cmc_id_cache: Optional[dict[str, int]] = None
+
+
+def _cmc_symbol_id_map() -> dict[str, int]:
+    """CMC 목록의 심볼 → id 매핑. 프로세스당 1회만 조회하고 캐싱한다."""
+    global _cmc_id_cache
+    if _cmc_id_cache is not None:
+        return _cmc_id_cache
+
+    id_map: dict[str, int] = {}
+    try:
+        sess = requests.Session()
+        sess.headers.update({"User-Agent": _SESSION.headers["User-Agent"],
+                             "Accept": "application/json"})
+        resp = sess.get(_CMC_URL, params=_CMC_PARAMS, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        crypto_list = data.get("data", {}).get("cryptoCurrencyList", [])
+        if not crypto_list:
+            crypto_list = data.get("data", [])
+        for item in crypto_list:
+            symbol = str(item.get("symbol", "")).upper().strip()
+            cmc_id = item.get("id")
+            if symbol and cmc_id:
+                id_map[symbol] = int(cmc_id)
+        logger.info(f"[CryptoResolve] CMC id 매핑 {len(id_map)}종목 로드")
+    except Exception as e:
+        logger.warning(f"[CryptoResolve] CMC id 매핑 조회 실패: {e}")
+
+    _cmc_id_cache = id_map
+    return id_map
 
 
 def _search_crypto_yahoo_ticker(symbol: str) -> Optional[str]:
     """
-    Yahoo Finance Search로 크립토 실제 티커 탐색.
-    예: HYPE → HYPE32196-USD
+    Yahoo Finance Search로 크립토 실제 티커 탐색 (보조 수단).
 
-    정규식을 `^{SYMBOL}\\d*-USD$`로 제한해 전혀 다른 코인이 매칭되는 것을 막는다
-    (Search는 유사 심볼도 같이 반환하므로 필터 없이 쓰면 오매칭 위험).
+    ⚠️ 단독으로는 신뢰할 수 없다. 주식 티커와 겹치는 심볼에서는 관련도 순위에
+       밀려 암호화폐가 아예 반환되지 않는다 (APT → Alpha Pro Tech/Aptiv만 나오고
+       max_results를 30으로 늘려도 CRYPTOCURRENCY 결과가 0건). 오답도 나온다
+       (POL 검색 결과에 Polkadot의 DOT-USD가 섞임). 그래서 CMC id 후보를 먼저
+       쓰고 이 함수는 CMC 목록에 없는 종목의 폴백으로만 사용한다.
+
+    정규식을 `^{SYMBOL}\\d*-USD$`로 제한해 위 오답이 채택되는 것을 막는다.
     """
     if symbol in _crypto_symbol_cache:
         return _crypto_symbol_cache[symbol]
@@ -394,21 +431,25 @@ def _search_crypto_yahoo_ticker(symbol: str) -> Optional[str]:
     found = None
     try:
         import yfinance as yf
-        for q in yf.Search(symbol, max_results=5).quotes:
+        for q in yf.Search(symbol, max_results=20).quotes:
             yt = str(q.get("symbol", ""))
             if re.match(rf"^{re.escape(symbol)}\d*-USD$", yt, re.IGNORECASE):
                 found = yt
                 break
     except Exception as e:
-        logger.debug(f"[CryptoSearch] {symbol} 검색 실패: {e}")
+        logger.debug(f"[CryptoResolve] {symbol} 검색 실패: {e}")
 
     _crypto_symbol_cache[symbol] = found
     return found
 
 
-def _retry_crypto_with_search(missing: list[str], start: str, end: str) -> list[pd.DataFrame]:
+def _retry_crypto_missing(missing: list[str], start: str, end: str) -> list[pd.DataFrame]:
     """
-    배치 수집에서 데이터가 하나도 안 나온 크립토 티커를 yf.Search로 재탐색해 재수집.
+    배치 수집에서 데이터가 하나도 안 나온 크립토 티커를 대체 심볼로 재수집한다.
+
+    후보 우선순위:
+      1. {SYMBOL}{CMC_id}-USD  — 결정적 매핑, 네트워크 조회 없음
+      2. yf.Search 결과        — CMC 목록에 없는 종목의 폴백
 
     ⚠️ 저장되는 Ticker 값은 반드시 원래 이름(HYPE-USD)을 유지해야 한다.
        parquet의 Ticker가 유니버스/워치리스트와 달라지면 소비 측
@@ -416,27 +457,43 @@ def _retry_crypto_with_search(missing: list[str], start: str, end: str) -> list[
     """
     import yfinance as yf
 
+    id_map = _cmc_symbol_id_map()
     recovered: list[pd.DataFrame] = []
-    for ticker in missing:
-        symbol = re.sub(r"-USD[T]?$", "", ticker.strip().upper())
-        resolved = _search_crypto_yahoo_ticker(symbol)
-        if not resolved or resolved.upper() == ticker.strip().upper():
-            continue
 
-        try:
-            raw = yf.download(resolved, start=start, end=end, auto_adjust=True,
-                              progress=False, threads=False)
-            if raw is None or raw.empty:
+    for ticker in missing:
+        original = ticker.strip().upper()
+        symbol = re.sub(r"-USD[T]?$", "", original)
+
+        candidates: list[str] = []
+        cmc_id = id_map.get(symbol)
+        if cmc_id:
+            candidates.append(f"{symbol}{cmc_id}-USD")
+
+        for cand in candidates + ["__search__"]:
+            if cand == "__search__":
+                # CMC id 후보가 없거나 실패했을 때만 검색 (네트워크 절약)
+                cand = _search_crypto_yahoo_ticker(symbol)
+                if not cand or cand in candidates:
+                    break
+            if cand.upper() == original:
                 continue
-            if isinstance(raw.columns, pd.MultiIndex):
-                raw = raw.xs(resolved, axis=1, level=1)
-            df_t = _finalize_ticker_frame(raw.copy(), ticker)
-            if df_t is not None:
-                logger.info(f"[CryptoSearch] {ticker} → {resolved} 로 복구 ({len(df_t)}행)")
-                recovered.append(df_t)
-        except Exception as e:
-            logger.debug(f"[CryptoSearch] {ticker}({resolved}) 재수집 실패: {e}")
-        time.sleep(0.3)
+
+            try:
+                raw = yf.download(cand, start=start, end=end, auto_adjust=True,
+                                  progress=False, threads=False)
+                if raw is None or raw.empty:
+                    continue
+                if isinstance(raw.columns, pd.MultiIndex):
+                    raw = raw.xs(cand, axis=1, level=1)
+                df_t = _finalize_ticker_frame(raw.copy(), ticker)
+                if df_t is not None:
+                    logger.info(f"[CryptoResolve] {ticker} → {cand} 로 복구 ({len(df_t)}행)")
+                    recovered.append(df_t)
+                    break
+            except Exception as e:
+                logger.debug(f"[CryptoResolve] {ticker}({cand}) 재수집 실패: {e}")
+            finally:
+                time.sleep(0.3)
 
     return recovered
 
@@ -555,9 +612,9 @@ def fetch_ohlc_range(tickers: list[str], start: str, end: str) -> tuple[pd.DataF
     if missing_crypto:
         logger.info(
             f"[OhlcCollector] 크립토 빈 응답 {len(missing_crypto)}종목 → "
-            f"Search 재탐색 시도: {missing_crypto[:20]}"
+            f"대체 심볼 재탐색 시도: {missing_crypto[:20]}"
         )
-        all_rows.extend(_retry_crypto_with_search(missing_crypto, start, end))
+        all_rows.extend(_retry_crypto_missing(missing_crypto, start, end))
 
     if failed:
         logger.warning(f"[OhlcCollector] 실패 종목 ({len(failed)}개): {failed[:20]}")
@@ -659,6 +716,15 @@ def backfill_market(
     for year in range(start_year, end_year + 1):
         start_str = f"{year}-01-01"
         end_str   = f"{year + 1}-01-01"  # yfinance end is exclusive
+
+        # ⚠️ save_year()는 "로컬 파일이 있으면" 병합하고 없으면 새로 쓴다. GHA 러너는
+        # 매번 빈 상태로 시작하므로, 기존 연도 파일을 먼저 받아두지 않으면 이번에
+        # 수집한 종목만 담긴 파일이 Drive를 덮어써 버린다. 실제로 2026-08-12
+        # crypto 2026 복구 백필에서 유니버스(CMC Top 200)에서 빠진 종목들의 데이터가
+        # 이렇게 소실됐다(197종목 → 172종목). update_market()/backfill_new_tickers()는
+        # 이미 다운로드를 선행하는데 여기만 빠져 있었다.
+        if not ohlc_db.local_path(market, year).exists():
+            ohlc_db.download_year(market, year)
 
         logger.info(f"[OhlcCollector] {market.upper()} {year}년 수집 중...")
         try:
