@@ -380,16 +380,21 @@ def _finalize_ticker_frame(df_t: pd.DataFrame, label: str) -> Optional[pd.DataFr
 # APT21794 / GRT6719 / COMP5692 / POL28321 / PI35697 / HYPE32196 — CMC id와 6/6 일치).
 # 유니버스를 CMC에서 받아오므로 id를 이미 갖고 있어 검색 없이 티커를 직접 구성할 수 있다.
 _crypto_symbol_cache: dict[str, Optional[str]] = {}
-_cmc_id_cache: Optional[dict[str, int]] = None
+_cmc_id_cache: Optional[dict[str, tuple[int, float]]] = None
 
 
-def _cmc_symbol_id_map() -> dict[str, int]:
-    """CMC 목록의 심볼 → id 매핑. 프로세스당 1회만 조회하고 캐싱한다."""
+def _cmc_listing() -> dict[str, tuple[int, float]]:
+    """
+    CMC 목록의 심볼 → (id, 현재가) 매핑. 프로세스당 1회만 조회하고 캐싱한다.
+
+    id는 Yahoo 접미사 티커를 구성하는 데, 가격은 Yahoo가 준 데이터가 정말 그 코인의
+    것인지 검증하는 데 쓴다 (resolve_symbol_overrides 참조).
+    """
     global _cmc_id_cache
     if _cmc_id_cache is not None:
         return _cmc_id_cache
 
-    id_map: dict[str, int] = {}
+    listing: dict[str, tuple[int, float]] = {}
     try:
         sess = requests.Session()
         sess.headers.update({"User-Agent": _SESSION.headers["User-Agent"],
@@ -403,14 +408,85 @@ def _cmc_symbol_id_map() -> dict[str, int]:
         for item in crypto_list:
             symbol = str(item.get("symbol", "")).upper().strip()
             cmc_id = item.get("id")
+            quotes = item.get("quotes", [])
+            price = None
+            if isinstance(quotes, list) and quotes:
+                price = quotes[0].get("price")
+            elif isinstance(quotes, dict):
+                price = quotes.get("USD", {}).get("price")
             if symbol and cmc_id:
-                id_map[symbol] = int(cmc_id)
-        logger.info(f"[CryptoResolve] CMC id 매핑 {len(id_map)}종목 로드")
+                listing[symbol] = (int(cmc_id), float(price) if price else 0.0)
+        logger.info(f"[CryptoResolve] CMC 목록 {len(listing)}종목 로드 (id + 가격)")
     except Exception as e:
-        logger.warning(f"[CryptoResolve] CMC id 매핑 조회 실패: {e}")
+        logger.warning(f"[CryptoResolve] CMC 목록 조회 실패: {e}")
 
-    _cmc_id_cache = id_map
-    return id_map
+    _cmc_id_cache = listing
+    return listing
+
+
+def _cmc_symbol_id_map() -> dict[str, int]:
+    """심볼 → CMC id (하위 호환용 얇은 래퍼)."""
+    return {sym: cid for sym, (cid, _price) in _cmc_listing().items()}
+
+
+# Yahoo가 준 가격이 CMC 가격과 이 배율 이상 어긋나면 다른 토큰으로 본다.
+# 거래소 간 가격차나 조회 시점 차이는 보통 수 % 수준이라 5배는 충분히 여유 있는 값이고,
+# 실제 오염 사례는 121배(ARB)~수십만 배(O, NEX)로 압도적으로 크다.
+_CMC_PRICE_MISMATCH_RATIO = 5.0
+
+
+def resolve_symbol_overrides(
+    tickers: list[str],
+    observed_prices: dict[str, float],
+    listing: dict[str, tuple[int, float]] | None = None,
+) -> dict[str, str]:
+    """
+    plain `{SYM}-USD`가 실제로 다른 토큰인 종목을 찾아 `{SYM}{CMCid}-USD`로 교체한다.
+
+    ⚠️ 이 문제는 "데이터 없음"과 성격이 완전히 다르다. Yahoo는 심볼이 겹칠 때 CMC id
+       접미사 티커를 새 코인에 배정하고 plain 심볼은 먼저 쓰던 다른 토큰에 남겨둔다.
+       그래서 plain 조회는 **에러 없이 성공**하지만 완전히 다른 자산의 시세를 준다.
+       누락은 시끄럽게 드러나는 반면 이건 조용히 틀려서 훨씬 위험하다.
+
+    실측 (2026-08-13, CMC Top 200 중 13종목):
+        ARB   plain $0.000629 vs 실제 Arbitrum  $0.0759  (121배)
+        JUP   plain $0.000260 vs 실제 Jupiter   $0.1692  (8280배)
+        AERO  plain $0.000036 vs 실제 Aerodrome $0.4112  (11538배)
+
+    Args:
+        tickers:         검사할 원래 티커 목록 ("ARB-USD" 형식)
+        observed_prices: Yahoo에서 실제로 받은 최근 종가 {티커: 가격}
+        listing:         CMC 심볼 → (id, 가격). 생략하면 조회한다.
+
+    Returns:
+        {원래 티커: 대체 Yahoo 심볼}. 교체가 필요 없으면 빈 dict.
+    """
+    if listing is None:
+        listing = _cmc_listing()
+
+    overrides: dict[str, str] = {}
+    for ticker in tickers:
+        observed = observed_prices.get(ticker)
+        if not observed or observed <= 0:
+            continue   # 조회 자체가 안 된 종목은 Search 폴백이 담당한다
+
+        symbol = re.sub(r"-USD[T]?$", "", ticker.strip().upper())
+        entry = listing.get(symbol)
+        if not entry:
+            continue   # CMC에 없으면 비교 기준이 없다
+        cmc_id, cmc_price = entry
+        if not cmc_price or cmc_price <= 0:
+            continue
+
+        ratio = max(observed, cmc_price) / min(observed, cmc_price)
+        if ratio > _CMC_PRICE_MISMATCH_RATIO:
+            overrides[ticker] = f"{symbol}{cmc_id}-USD"
+            logger.warning(
+                f"[CryptoResolve] {ticker} 가격 불일치 {ratio:,.0f}배 "
+                f"(Yahoo {observed:.8g} vs CMC {cmc_price:.8g}) → {overrides[ticker]} 로 교체"
+            )
+
+    return overrides
 
 
 def _search_crypto_yahoo_ticker(symbol: str) -> Optional[str]:
@@ -498,7 +574,43 @@ def _retry_crypto_missing(missing: list[str], start: str, end: str) -> list[pd.D
     return recovered
 
 
-def fetch_ohlc_range(tickers: list[str], start: str, end: str) -> tuple[pd.DataFrame, list[str]]:
+def build_symbol_overrides(tickers: list[str], probe_days: int = 7) -> dict[str, str]:
+    """
+    실행 시작 시 1회 호출해 "plain 심볼이 다른 토큰인" 종목의 교체 맵을 만든다.
+
+    최근 며칠 시세만 받아 CMC 가격과 대조한다. 과거 연도 데이터로는 비교할 수 없어
+    (몇 년 전 가격과 오늘 CMC 가격은 당연히 다르다) 반드시 최신 구간으로 판정한 뒤,
+    그 결과를 모든 연도 수집에 재사용해야 한다.
+    """
+    crypto = [t for t in tickers if t.strip().upper().endswith(("-USD", "-USDT"))]
+    if not crypto:
+        return {}
+
+    end_dt = date.today() + timedelta(days=1)
+    start_dt = end_dt - timedelta(days=probe_days)
+    probe, _ = fetch_ohlc_range(
+        crypto, start_dt.strftime("%Y-%m-%d"), end_dt.strftime("%Y-%m-%d"),
+        _skip_override_check=True,
+    )
+    if probe.empty:
+        logger.warning("[CryptoResolve] 심볼 검증용 시세를 받지 못함 — 교체 없이 진행")
+        return {}
+
+    latest = (probe.sort_values("Date").groupby("Ticker")["Close"].last()).to_dict()
+    overrides = resolve_symbol_overrides(crypto, latest)
+    logger.info(
+        f"[CryptoResolve] 심볼 검증 완료: {len(latest)}종목 확인, {len(overrides)}종목 교체"
+    )
+    return overrides
+
+
+def fetch_ohlc_range(
+    tickers: list[str],
+    start: str,
+    end: str,
+    symbol_overrides: Optional[dict[str, str]] = None,
+    _skip_override_check: bool = False,
+) -> tuple[pd.DataFrame, list[str]]:
     """
     yfinance batch download → flat DataFrame (Ticker | Date | Open | High | Low | Close | Volume)
 
@@ -531,8 +643,13 @@ def fetch_ohlc_range(tickers: list[str], start: str, end: str) -> tuple[pd.DataF
     all_rows: list[pd.DataFrame] = []
     failed: list[str] = []
 
+    # 원래 티커 → 실제 조회에 쓸 Yahoo 심볼. 저장 라벨은 언제나 원래 티커를 쓴다
+    # (parquet의 Ticker가 유니버스와 달라지면 소비 측이 종목을 못 찾는다).
+    query_of = {t: (symbol_overrides or {}).get(t, t) for t in tickers}
+
     for i in batch_iter:
         batch = tickers[i: i + _BATCH_SIZE]
+        query_batch = [query_of[t] for t in batch]
         batch_no = i // _BATCH_SIZE + 1
         total_batches = (len(tickers) + _BATCH_SIZE - 1) // _BATCH_SIZE
 
@@ -545,7 +662,7 @@ def fetch_ohlc_range(tickers: list[str], start: str, end: str) -> tuple[pd.DataF
         for attempt in range(_BATCH_MAX_RETRIES + 1):
             try:
                 raw = yf.download(
-                    batch,
+                    query_batch,
                     start=start,
                     end=end,
                     auto_adjust=True,
@@ -587,7 +704,8 @@ def fetch_ohlc_range(tickers: list[str], start: str, end: str) -> tuple[pd.DataF
         # ── MultiIndex / 단일 ticker 분기 처리 ──────────────────────────────
         for ticker in batch:
             try:
-                df_t = _extract_ticker_df(raw, ticker, len(batch))
+                # 조회는 교체된 심볼로, 저장 라벨은 원래 티커로.
+                df_t = _extract_ticker_df(raw, query_of[ticker], len(query_batch))
                 if df_t is None or df_t.empty:
                     continue
                 df_t = _finalize_ticker_frame(df_t, ticker)
@@ -711,6 +829,10 @@ def backfill_market(
         f"{start_year}~{end_year}년 / {len(tickers)}종목"
     )
 
+    # 심볼 교체 맵은 최신 시세로만 판정할 수 있으므로 연도 루프 밖에서 1회 만들어
+    # 모든 연도에 재사용한다 (과거 연도 가격은 오늘 CMC 가격과 당연히 다르다).
+    symbol_overrides = build_symbol_overrides(tickers)
+
     all_dates: list[date] = []
 
     for year in range(start_year, end_year + 1):
@@ -728,7 +850,8 @@ def backfill_market(
 
         logger.info(f"[OhlcCollector] {market.upper()} {year}년 수집 중...")
         try:
-            df, _ = fetch_ohlc_range(tickers, start_str, end_str)
+            df, _ = fetch_ohlc_range(tickers, start_str, end_str,
+                                      symbol_overrides=symbol_overrides)
         except Exception as e:
             logger.error(f"[OhlcCollector] {market} {year}년 수집 실패: {e}")
             continue
@@ -803,6 +926,9 @@ def backfill_new_tickers(
         f"(신규 {new_count}개, 미완료 재시도 {retry_count}개): {candidates}"
     )
 
+    # 최신 시세로 1회 판정 후 모든 연도에 재사용 (backfill_market과 동일한 이유).
+    symbol_overrides = build_symbol_overrides(candidates)
+
     current_year = date.today().year
     all_dates: list[date] = []
     ticker_failed: set[str] = set()
@@ -819,7 +945,8 @@ def backfill_new_tickers(
             f"({len(candidates)}종목)"
         )
         try:
-            df, failed_tickers = fetch_ohlc_range(candidates, start_str, end_str)
+            df, failed_tickers = fetch_ohlc_range(candidates, start_str, end_str,
+                                                   symbol_overrides=symbol_overrides)
         except Exception as e:
             logger.error(f"[NewTickerBackfill] {market} {year}년 수집 실패: {e}")
             ticker_failed.update(candidates)
@@ -979,7 +1106,8 @@ def update_market(
 
     # 6. 수집
     try:
-        new_df, _ = fetch_ohlc_range(tickers, start_str, end_str)
+        new_df, _ = fetch_ohlc_range(tickers, start_str, end_str,
+                                      symbol_overrides=build_symbol_overrides(tickers))
     except Exception as e:
         logger.error(f"[OhlcCollector] {market} 증분 수집 실패: {e}")
         return
