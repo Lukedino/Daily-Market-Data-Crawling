@@ -64,6 +64,12 @@ _RATE_LIMIT_BACKOFF_SECONDS = [30, 60, 120]
 _GENERIC_RETRY_BACKOFF_SECONDS = [5, 10, 20]
 _CMC_TOP_N  = 200  # CoinMarketCap 상위 N개
 
+# Parquet 저장 스키마 (ohlc_db._SCHEMA_COLS와 동일 순서)
+_EXTENDED_COLS = [
+    "Ticker", "Date", "Open", "High", "Low", "Close", "Volume",
+    "Amount", "ChangesRatio", "MarketCap", "Dividends", "Splits",
+]
+
 # ── ETF 판별 세트 (Market 태그용) ─────────────────────────────────────────────
 _ETF_SET = {
     "SPY", "QQQ", "IWM", "DIA", "VOO", "VTI", "ARKK",
@@ -317,6 +323,124 @@ def load_tickers(market: str) -> list[str]:
 # 핵심 수집 함수
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _finalize_ticker_frame(df_t: pd.DataFrame, label: str) -> Optional[pd.DataFrame]:
+    """
+    yfinance 원본 프레임 → 저장 스키마로 정규화.
+
+    label은 결과 Ticker 컬럼에 기록할 이름이다. 크립토 티커 충돌 보정
+    (_retry_crypto_with_search)에서 실제 조회 심볼(HYPE32196-USD)과
+    저장할 이름(HYPE-USD)이 달라지므로 분리해서 받는다.
+    """
+    # tz 제거 및 Date 변환
+    df_t = df_t.reset_index()
+    date_col = df_t.columns[0]  # 'Date' or 'Datetime'
+    df_t[date_col] = pd.to_datetime(df_t[date_col])
+    if df_t[date_col].dt.tz is not None:
+        df_t[date_col] = df_t[date_col].dt.tz_localize(None)
+    df_t[date_col] = df_t[date_col].dt.date
+    df_t = df_t.rename(columns={date_col: "Date"})
+
+    # 컬럼 정규화
+    df_t = df_t.rename(columns={
+        "open": "Open", "high": "High", "low": "Low",
+        "close": "Close", "volume": "Volume",
+    })
+
+    df_t["Ticker"] = label
+    keep = ["Ticker", "Date", "Open", "High", "Low", "Close", "Volume"]
+    df_t = df_t[[c for c in keep if c in df_t.columns]]
+
+    # Close 유효한 행만
+    df_t = df_t.dropna(subset=["Close"])
+    df_t = df_t[df_t["Close"] > 0]
+    if df_t.empty:
+        return None
+
+    # ── 파생 컬럼 추가 ────────────────────────────────────
+    df_t = df_t.sort_values("Date").reset_index(drop=True)
+    # Amount = Close × Volume (거래대금)
+    df_t["Amount"] = df_t["Close"] * df_t["Volume"]
+    # ChangesRatio = (Close / PrevClose - 1) × 100, 첫날 NaN
+    df_t["ChangesRatio"] = df_t["Close"].pct_change() * 100
+    # MarketCap: daily update 시 채워짐
+    df_t["MarketCap"] = float("nan")
+    # Dividends / Splits 초기값
+    df_t["Dividends"] = 0.0
+    df_t["Splits"]    = 1.0
+    return df_t
+
+
+# ── 크립토 티커 충돌 보정 ─────────────────────────────────────────────────────
+# Yahoo는 신규/동명 코인을 구분하려고 심볼에 숫자 접미사를 붙인다
+# (예: HYPE-USD는 존재하지 않고 HYPE32196-USD로만 조회됨).
+# yf.download()는 exact match만 하므로 이런 종목은 예외도 없이 빈 응답이 되어
+# failed 목록에도 안 남고 조용히 누락된다 — Mr.Stock-Market-Crawler는
+# step4_ohlc_atr_core._search_crypto_yahoo_ticker()로 이미 대응하고 있어
+# 동일한 정규식/우선순위를 여기에도 이식한다.
+_crypto_symbol_cache: dict[str, Optional[str]] = {}
+
+
+def _search_crypto_yahoo_ticker(symbol: str) -> Optional[str]:
+    """
+    Yahoo Finance Search로 크립토 실제 티커 탐색.
+    예: HYPE → HYPE32196-USD
+
+    정규식을 `^{SYMBOL}\\d*-USD$`로 제한해 전혀 다른 코인이 매칭되는 것을 막는다
+    (Search는 유사 심볼도 같이 반환하므로 필터 없이 쓰면 오매칭 위험).
+    """
+    if symbol in _crypto_symbol_cache:
+        return _crypto_symbol_cache[symbol]
+
+    found = None
+    try:
+        import yfinance as yf
+        for q in yf.Search(symbol, max_results=5).quotes:
+            yt = str(q.get("symbol", ""))
+            if re.match(rf"^{re.escape(symbol)}\d*-USD$", yt, re.IGNORECASE):
+                found = yt
+                break
+    except Exception as e:
+        logger.debug(f"[CryptoSearch] {symbol} 검색 실패: {e}")
+
+    _crypto_symbol_cache[symbol] = found
+    return found
+
+
+def _retry_crypto_with_search(missing: list[str], start: str, end: str) -> list[pd.DataFrame]:
+    """
+    배치 수집에서 데이터가 하나도 안 나온 크립토 티커를 yf.Search로 재탐색해 재수집.
+
+    ⚠️ 저장되는 Ticker 값은 반드시 원래 이름(HYPE-USD)을 유지해야 한다.
+       parquet의 Ticker가 유니버스/워치리스트와 달라지면 소비 측
+       (Trading-AI-Pipeline의 CustomChartFetcher 등)이 종목을 못 찾는다.
+    """
+    import yfinance as yf
+
+    recovered: list[pd.DataFrame] = []
+    for ticker in missing:
+        symbol = re.sub(r"-USD[T]?$", "", ticker.strip().upper())
+        resolved = _search_crypto_yahoo_ticker(symbol)
+        if not resolved or resolved.upper() == ticker.strip().upper():
+            continue
+
+        try:
+            raw = yf.download(resolved, start=start, end=end, auto_adjust=True,
+                              progress=False, threads=False)
+            if raw is None or raw.empty:
+                continue
+            if isinstance(raw.columns, pd.MultiIndex):
+                raw = raw.xs(resolved, axis=1, level=1)
+            df_t = _finalize_ticker_frame(raw.copy(), ticker)
+            if df_t is not None:
+                logger.info(f"[CryptoSearch] {ticker} → {resolved} 로 복구 ({len(df_t)}행)")
+                recovered.append(df_t)
+        except Exception as e:
+            logger.debug(f"[CryptoSearch] {ticker}({resolved}) 재수집 실패: {e}")
+        time.sleep(0.3)
+
+    return recovered
+
+
 def fetch_ohlc_range(tickers: list[str], start: str, end: str) -> tuple[pd.DataFrame, list[str]]:
     """
     yfinance batch download → flat DataFrame (Ticker | Date | Open | High | Low | Close | Volume)
@@ -325,6 +449,7 @@ def fetch_ohlc_range(tickers: list[str], start: str, end: str) -> tuple[pd.DataF
     - MultiIndex → flat 변환 (단일/복수 ticker 모두 처리)
     - tz 제거, 중복 제거
     - 실패 종목 로깅 후 계속
+    - 크립토(-USD)는 배치에서 빈 응답이면 yf.Search로 실제 심볼 재탐색 후 재수집
 
     Args:
         tickers: 수집할 티커 목록
@@ -408,47 +533,9 @@ def fetch_ohlc_range(tickers: list[str], start: str, end: str) -> tuple[pd.DataF
                 df_t = _extract_ticker_df(raw, ticker, len(batch))
                 if df_t is None or df_t.empty:
                     continue
-
-                # tz 제거 및 Date 변환
-                df_t = df_t.reset_index()
-                date_col = df_t.columns[0]  # 'Date' or 'Datetime'
-                df_t[date_col] = pd.to_datetime(df_t[date_col])
-                if df_t[date_col].dt.tz is not None:
-                    df_t[date_col] = df_t[date_col].dt.tz_localize(None)
-                df_t[date_col] = df_t[date_col].dt.date
-                df_t = df_t.rename(columns={date_col: "Date"})
-
-                # 컬럼 정규화
-                df_t = df_t.rename(columns={
-                    "open": "Open", "high": "High", "low": "Low",
-                    "close": "Close", "volume": "Volume",
-                })
-
-                df_t["Ticker"] = ticker
-                keep = ["Ticker", "Date", "Open", "High", "Low", "Close", "Volume"]
-                df_t = df_t[[c for c in keep if c in df_t.columns]]
-
-                # Close 유효한 행만
-                df_t = df_t.dropna(subset=["Close"])
-                df_t = df_t[df_t["Close"] > 0]
-
-                if not df_t.empty:
-                    # ── 파생 컬럼 추가 ────────────────────────────────────
-                    df_t = df_t.sort_values("Date").reset_index(drop=True)
-                    # Amount = Close × Volume (거래대금)
-                    df_t["Amount"] = df_t["Close"] * df_t["Volume"]
-                    # ChangesRatio = (Close / PrevClose - 1) × 100, 첫날 NaN
-                    df_t["ChangesRatio"] = (
-                        df_t["Close"].pct_change() * 100
-                    )
-                    # MarketCap: daily update 시 채워짐
-                    df_t["MarketCap"] = float("nan")
-                    # Dividends / Splits 초기값
-                    df_t["Dividends"] = 0.0
-                    df_t["Splits"]    = 1.0
-
+                df_t = _finalize_ticker_frame(df_t, ticker)
+                if df_t is not None:
                     all_rows.append(df_t)
-
             except Exception as e:
                 logger.debug(f"[OhlcCollector] {ticker} 처리 실패: {e}")
                 failed.append(ticker)
@@ -456,13 +543,24 @@ def fetch_ohlc_range(tickers: list[str], start: str, end: str) -> tuple[pd.DataF
         # 배치 간 딜레이 (rate limit)
         time.sleep(1.0)
 
+    # ── 크립토 티커 충돌 보정 ────────────────────────────────────────────────
+    # 배치에서 한 행도 못 받은 -USD 종목은 Yahoo 심볼 불일치(숫자 접미사) 가능성이
+    # 있으므로 Search로 실제 심볼을 찾아 재수집한다. 상장 전 구간이라 정말로
+    # 데이터가 없는 경우엔 Search도 빈손이라 그대로 넘어간다.
+    collected = {t for df_t in all_rows for t in df_t["Ticker"].unique()}
+    missing_crypto = [
+        t for t in tickers
+        if t not in collected and t.strip().upper().endswith(("-USD", "-USDT"))
+    ]
+    if missing_crypto:
+        logger.info(
+            f"[OhlcCollector] 크립토 빈 응답 {len(missing_crypto)}종목 → "
+            f"Search 재탐색 시도: {missing_crypto[:20]}"
+        )
+        all_rows.extend(_retry_crypto_with_search(missing_crypto, start, end))
+
     if failed:
         logger.warning(f"[OhlcCollector] 실패 종목 ({len(failed)}개): {failed[:20]}")
-
-    _EXTENDED_COLS = [
-        "Ticker", "Date", "Open", "High", "Low", "Close", "Volume",
-        "Amount", "ChangesRatio", "MarketCap", "Dividends", "Splits",
-    ]
 
     if not all_rows:
         logger.warning(f"[OhlcCollector] {start}~{end} 수집 결과 없음")
@@ -775,7 +873,20 @@ def update_market(
         logger.info(f"[OhlcCollector] {market} status 없음 → 기준일: {last_date}")
 
     # 3. 수집 범위
-    start_date = last_date + timedelta(days=1)
+    if market == "crypto":
+        # ⚠️ [BUG-PARTIAL-CANDLE] 크립토는 24/7이라 "일봉 마감"이 UTC 00:00인데,
+        # ohlc-daily.yml은 UTC 22:00에 돈다 — 즉 수집 시점에 오늘 캔들은 아직
+        # 2시간 남은 미완성 상태다(Close가 종가가 아닌 22:00 시점 가격, High/Low
+        # 마지막 2시간 누락, Volume ~92%). 그런데 last_updated를 그 날짜로 올려
+        # 버리면 다음 실행은 그 다음날부터 조회하므로 미완성 캔들이 영구히
+        # 확정값으로 남는다.
+        # → 커서를 하루 물려 직전 수집일을 다시 받아 덮어쓴다. save_year()가
+        #   (Ticker, Date) 중복을 keep="last"로 정리하므로 최신 조회분이 이긴다.
+        # US는 장마감(UTC 20~21시)이 크롤 시각보다 앞서 캔들이 이미 확정이라
+        # 해당 없음 — 불필요한 재조회를 피하려고 크립토에만 적용한다.
+        start_date = last_date
+    else:
+        start_date = last_date + timedelta(days=1)
     end_date   = date.today() + timedelta(days=1)  # yfinance end는 exclusive이므로 +1
 
     # 4. 이미 최신이면 종료
