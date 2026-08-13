@@ -382,6 +382,16 @@ def _finalize_ticker_frame(df_t: pd.DataFrame, label: str) -> Optional[pd.DataFr
 _crypto_symbol_cache: dict[str, Optional[str]] = {}
 _cmc_id_cache: Optional[dict[str, tuple[int, float]]] = None
 
+# 재탐색으로 실제 데이터를 받아낸 심볼 {원래 티커: 조회 심볼}.
+#
+# ⚠️ 이걸 기록하지 않으면 오염이 재발한다. plain 심볼이 "최근" 시세를 안 주는
+#    종목(옛 토큰이 이미 거래정지)은 프로브 단계에서 CMC id 티커로 복구되는데,
+#    복구 데이터는 원래 티커명으로 라벨링되므로 CMC 가격과 일치해
+#    resolve_symbol_overrides가 "교체 불필요"로 판정한다. 그런데 옛 토큰은
+#    **과거에는 거래됐기 때문에** 연도별 조회에서 plain 심볼로 나가면 그 시절
+#    데이터가 멀쩡히 반환되어 저장된다. UNI/COMP/APT/SUI가 정확히 이렇게 오염됐다.
+_discovered_symbols: dict[str, str] = {}
+
 
 def _cmc_listing() -> dict[str, tuple[int, float]]:
     """
@@ -579,6 +589,8 @@ def _retry_crypto_missing(
                 df_t = _finalize_ticker_frame(raw.copy(), ticker)
                 if df_t is not None:
                     logger.info(f"[CryptoResolve] {ticker} → {cand} 로 복구 ({len(df_t)}행)")
+                    # 이후 연도 조회가 plain 심볼(옛 토큰)로 새지 않도록 기록해 둔다.
+                    _discovered_symbols[ticker] = cand
                     recovered.append(df_t)
                     break
             except Exception as e:
@@ -615,6 +627,16 @@ def build_symbol_overrides(tickers: list[str], probe_days: int = 7) -> dict[str,
 
     latest = (probe.sort_values("Date").groupby("Ticker")["Close"].last()).to_dict()
     overrides = resolve_symbol_overrides(crypto, latest)
+
+    # 가격 대조로는 안 걸리지만 프로브의 재탐색이 실제로 알아낸 심볼도 합친다.
+    # 이게 빠지면 옛 토큰이 거래정지된 종목(UNI/COMP/APT/SUI 등)이 연도별 조회에서
+    # 다시 plain 심볼로 나가 과거 시절 데이터를 그대로 가져온다.
+    promoted = {t: s for t, s in _discovered_symbols.items()
+                if t in set(crypto) and t not in overrides}
+    if promoted:
+        logger.info(f"[CryptoResolve] 재탐색으로 알아낸 심볼 {len(promoted)}종목 추가 반영")
+        overrides.update(promoted)
+
     logger.info(
         f"[CryptoResolve] 심볼 검증 완료: {len(latest)}종목 확인, {len(overrides)}종목 교체"
     )
@@ -779,12 +801,17 @@ def _extract_ticker_df(raw: pd.DataFrame, ticker: str, batch_size: int) -> Optio
     yfinance 응답에서 단일 ticker DataFrame 추출.
     단일 ticker / MultiIndex 양쪽 처리.
     """
-    if batch_size == 1:
-        # 단일 ticker: 일반 DataFrame
+    cols = raw.columns
+
+    if batch_size == 1 and not isinstance(cols, pd.MultiIndex):
+        # 단일 ticker이면서 flat 컬럼: 그대로 사용
         return raw.copy()
 
-    # 복수 ticker: MultiIndex columns
-    cols = raw.columns
+    # ⚠️ 배치가 1이어도 최신 yfinance는 MultiIndex 컬럼을 줄 수 있다. 예전에는
+    #    batch_size == 1이면 무조건 flat이라고 보고 raw를 그대로 돌려줬는데, 그러면
+    #    _finalize_ticker_frame이 'Close'를 못 찾아 그 종목이 통째로 실패한다.
+    #    _BATCH_SIZE=50이라 드물어 보이지만 유니버스가 201종목이면 마지막 배치가
+    #    정확히 1종목이다(크립토 유니버스가 실제로 200~202개).
     if isinstance(cols, pd.MultiIndex):
         # columns: (metric, ticker) 형태
         # level 확인
@@ -873,13 +900,16 @@ def backfill_market(
             logger.error(f"[OhlcCollector] {market} {year}년 수집 실패: {e}")
             continue
 
+        # ⚠️ 빈 결과라도 save_year를 건너뛰면 안 된다. "이번에 다시 받기로 한 종목인데
+        # 해당 연도엔 데이터가 없다"는 것 자체가 정보이며, 기존에 저장된 잘못된 토큰
+        # 데이터를 걷어내야 한다 (ARB 2022년이 정확히 이 경우 — Arbitrum은 2023년
+        # 출시라 올바른 심볼에 2022년 데이터가 없는데, 옛 오염 행이 남아 있었다).
         if df.empty:
-            logger.warning(f"[OhlcCollector] {market} {year}년 데이터 없음")
-            continue
+            logger.warning(f"[OhlcCollector] {market} {year}년 데이터 없음 — 기존 행만 정리")
 
-        ohlc_db.save_year(df, market, year)
+        ohlc_db.save_year(df, market, year, replace_tickers=tickers)
 
-        if "Date" in df.columns:
+        if "Date" in df.columns and not df.empty:
             all_dates.extend(df["Date"].tolist())
 
         if upload:

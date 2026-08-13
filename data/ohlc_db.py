@@ -122,13 +122,27 @@ def first_seen_dates(market: str) -> dict[str, date]:
     return first_dates
 
 
-def save_year(df: pd.DataFrame, market: str, year: int):
+def save_year(df: pd.DataFrame, market: str, year: int,
+              replace_tickers: Optional[list[str]] = None):
     """
     연도별 Parquet 저장.
     기존 파일이 있으면 병합 후 (Ticker, Date) 기준 중복 제거 (최신 우선).
     snappy 압축으로 저장.
+
+    Args:
+        replace_tickers: 지정하면 이 종목들의 **기존 행을 전부 버리고** 이번 df로
+            대체한다. 행 단위 병합만으로는 지울 수 없는 오염을 걷어내기 위한 것이다.
+
+            ⚠️ 왜 필요한가: 잘못된 토큰 데이터가 이미 저장돼 있는데 재수집에서 그
+            날짜에 데이터가 안 나오면(예: Arbitrum은 2023년 출시라 ARB11841-USD에
+            2022년 데이터가 없음) 행 단위 병합으로는 옛 오염 행이 그대로 살아남는다.
+            실제로 crypto 재백필 후에도 61/228 종목의 접합이 그대로였다.
+
+            지정하지 않으면 기존 동작(행 단위 병합)이 그대로 유지되므로, 이번
+            유니버스에 없는 종목의 과거 데이터는 보존된다
+            ([BUG-BACKFILL-REPLACE] 참조).
     """
-    if df.empty:
+    if df.empty and not replace_tickers:
         logger.warning(f"[OhlcDB] 빈 DataFrame → 저장 건너뜀: {market}_{year}")
         return
 
@@ -137,7 +151,7 @@ def save_year(df: pd.DataFrame, market: str, year: int):
 
     # Date 타입 통일
     df = df.copy()
-    if "Date" in df.columns:
+    if "Date" in df.columns and not df.empty:
         df["Date"] = pd.to_datetime(df["Date"]).dt.date
 
     # 기존 파일 병합
@@ -145,9 +159,27 @@ def save_year(df: pd.DataFrame, market: str, year: int):
         try:
             existing = load_year(market, year)
             if not existing.empty:
-                df = pd.concat([existing, df], ignore_index=True)
+                if replace_tickers:
+                    purge = {str(t).strip().upper() for t in replace_tickers}
+                    before = len(existing)
+                    existing = existing[
+                        ~existing["Ticker"].astype(str).str.strip().str.upper().isin(purge)
+                    ]
+                    if before != len(existing):
+                        logger.info(
+                            f"[OhlcDB] {market}_{year}: 재수집 대상 종목의 기존 행 "
+                            f"{before - len(existing):,}개 제거 후 재적재"
+                        )
+                # 빈 프레임을 concat에 넣으면 dtype 추론이 흔들린다는 경고가 뜨므로
+                # 실제로 붙일 내용이 있을 때만 합친다.
+                frames = [f for f in (existing, df) if not f.empty]
+                df = pd.concat(frames, ignore_index=True) if frames else df
         except Exception as e:
             logger.warning(f"[OhlcDB] 기존 파일 병합 실패 → 덮어씀: {e}")
+
+    if df.empty:
+        logger.warning(f"[OhlcDB] 병합 결과가 비어 있음 → 저장 건너뜀: {market}_{year}")
+        return
 
     # 중복 제거 (최신 우선)
     if "Ticker" in df.columns and "Date" in df.columns:

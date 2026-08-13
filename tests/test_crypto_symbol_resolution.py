@@ -123,5 +123,67 @@ def test_retry_still_tries_cmc_id_when_main_batch_used_plain_symbol(monkeypatch)
     assert "HYPE32196-USD" in calls
 
 
+# ── 재탐색 결과를 override로 승격 ─────────────────────────────────────────────
+# plain 심볼이 "최근" 시세를 안 주면(옛 토큰이 이미 거래정지) 프로브 단계에서
+# _retry_crypto_missing이 CMC id 티커로 복구한다. 그런데 복구 데이터는 원래
+# 티커명으로 라벨링되므로 CMC 가격과 일치하고, resolve_symbol_overrides는
+# "교체 불필요"로 판정해 그 발견을 버렸다.
+#
+# 문제는 옛 토큰이 **과거에는 거래됐다는** 점이다. 연도별 조회에서 plain 심볼로
+# 다시 나가면 그 시절 데이터가 멀쩡히 반환되어 저장된다 — UNI/COMP/APT/SUI가
+# 정확히 이렇게 오염됐다. 재탐색으로 알아낸 심볼은 반드시 재사용해야 한다.
+
+def test_retry_records_resolved_symbol(monkeypatch):
+    import pandas as pd
+    import yfinance as yf
+
+    import data.ohlc_collector as oc
+
+    def _fake_download(symbol, **kwargs):
+        if symbol != "UNI7083-USD":
+            return pd.DataFrame()
+        idx = pd.date_range("2026-08-01", periods=3, freq="D")
+        return pd.DataFrame(
+            {"Open": [7.0] * 3, "High": [7.1] * 3, "Low": [6.9] * 3,
+             "Close": [7.0] * 3, "Volume": [1e6] * 3},
+            index=idx,
+        )
+
+    monkeypatch.setattr(yf, "download", _fake_download)
+    monkeypatch.setattr(oc, "_cmc_listing", lambda: {"UNI": (7083, 7.0)})
+    monkeypatch.setattr(oc, "_discovered_symbols", {})
+
+    frames = oc._retry_crypto_missing(["UNI-USD"], "2026-08-01", "2026-08-04")
+
+    assert frames, "복구 자체가 실패했다"
+    assert oc._discovered_symbols.get("UNI-USD") == "UNI7083-USD", \
+        "복구에 성공한 심볼이 기록되지 않았다"
+
+
+def test_build_overrides_promotes_discovered_symbols(monkeypatch):
+    """
+    가격 대조로는 안 걸리지만 재탐색으로 알아낸 심볼도 override에 포함되어야
+    연도별 조회가 옛 토큰으로 새지 않는다.
+    """
+    import pandas as pd
+
+    import data.ohlc_collector as oc
+
+    monkeypatch.setattr(oc, "_discovered_symbols", {"UNI-USD": "UNI7083-USD"})
+    monkeypatch.setattr(oc, "_cmc_listing", lambda: {"UNI": (7083, 7.0)})
+    monkeypatch.setattr(
+        oc, "fetch_ohlc_range",
+        lambda tickers, start, end, **kw: (
+            pd.DataFrame({"Ticker": ["UNI-USD"], "Date": [pd.Timestamp("2026-08-12")],
+                          "Close": [7.0]}),
+            [],
+        ),
+    )
+
+    overrides = oc.build_symbol_overrides(["UNI-USD"])
+
+    assert overrides.get("UNI-USD") == "UNI7083-USD"
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
