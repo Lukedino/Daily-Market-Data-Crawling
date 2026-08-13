@@ -519,7 +519,12 @@ def _search_crypto_yahoo_ticker(symbol: str) -> Optional[str]:
     return found
 
 
-def _retry_crypto_missing(missing: list[str], start: str, end: str) -> list[pd.DataFrame]:
+def _retry_crypto_missing(
+    missing: list[str],
+    start: str,
+    end: str,
+    already_queried: Optional[dict[str, str]] = None,
+) -> list[pd.DataFrame]:
     """
     배치 수집에서 데이터가 하나도 안 나온 크립토 티커를 대체 심볼로 재수집한다.
 
@@ -530,15 +535,24 @@ def _retry_crypto_missing(missing: list[str], start: str, end: str) -> list[pd.D
     ⚠️ 저장되는 Ticker 값은 반드시 원래 이름(HYPE-USD)을 유지해야 한다.
        parquet의 Ticker가 유니버스/워치리스트와 달라지면 소비 측
        (Trading-AI-Pipeline의 CustomChartFetcher 등)이 종목을 못 찾는다.
+
+    Args:
+        already_queried: 본 배치에서 각 티커를 실제로 어떤 심볼로 조회했는지
+            ({원래 티커: 조회 심볼}). 상장 전 구간에서는 정상적으로 빈 응답이
+            오는데, symbol_overrides로 이미 {SYM}{id}-USD를 조회한 뒤라면 같은
+            심볼을 또 받는 것은 순수 낭비다. 백필은 연도 × 종목으로 도는 탓에
+            이 낭비가 곱해지므로 여기서 걸러낸다.
     """
     import yfinance as yf
 
     id_map = _cmc_symbol_id_map()
+    already_queried = already_queried or {}
     recovered: list[pd.DataFrame] = []
 
     for ticker in missing:
         original = ticker.strip().upper()
         symbol = re.sub(r"-USD[T]?$", "", original)
+        tried = {already_queried.get(ticker, ticker).upper(), original}
 
         candidates: list[str] = []
         cmc_id = id_map.get(symbol)
@@ -551,8 +565,9 @@ def _retry_crypto_missing(missing: list[str], start: str, end: str) -> list[pd.D
                 cand = _search_crypto_yahoo_ticker(symbol)
                 if not cand or cand in candidates:
                     break
-            if cand.upper() == original:
+            if cand.upper() in tried:
                 continue
+            tried.add(cand.upper())
 
             try:
                 raw = yf.download(cand, start=start, end=end, auto_adjust=True,
@@ -732,7 +747,8 @@ def fetch_ohlc_range(
             f"[OhlcCollector] 크립토 빈 응답 {len(missing_crypto)}종목 → "
             f"대체 심볼 재탐색 시도: {missing_crypto[:20]}"
         )
-        all_rows.extend(_retry_crypto_missing(missing_crypto, start, end))
+        all_rows.extend(_retry_crypto_missing(missing_crypto, start, end,
+                                               already_queried=query_of))
 
     if failed:
         logger.warning(f"[OhlcCollector] 실패 종목 ({len(failed)}개): {failed[:20]}")

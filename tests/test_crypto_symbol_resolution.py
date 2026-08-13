@@ -69,5 +69,59 @@ def test_skips_non_positive_prices():
     assert resolve_symbol_overrides(["ARB-USD"], {"ARB-USD": 0.0}, CMC) == {}
 
 
+# ── 중복 조회 방지 ────────────────────────────────────────────────────────────
+# 상장 전 구간(예: 2021년에 SUI/ONDO/TAO)은 정상적으로 빈 응답이 온다. 이때
+# _retry_crypto_missing이 "빈 응답 = 심볼이 틀렸다"로 보고 재탐색에 들어가는데,
+# 이미 override로 {SYM}{id}-USD를 조회했다면 같은 심볼을 또 받는 것은 순수 낭비다.
+# 백필은 연도 × 종목으로 도는 탓에 이 낭비가 곱해진다.
+
+def test_retry_skips_symbol_already_queried_in_main_batch(monkeypatch):
+    import data.ohlc_collector as oc
+
+    calls = []
+
+    def _fake_download(symbol, **kwargs):
+        calls.append(symbol)
+        import pandas as pd
+        return pd.DataFrame()
+
+    import yfinance as yf
+    monkeypatch.setattr(yf, "download", _fake_download)
+    monkeypatch.setattr(oc, "_cmc_listing", lambda: {"M": (35491, 1.09)})
+    monkeypatch.setattr(oc, "_search_crypto_yahoo_ticker", lambda sym: None)
+
+    # 본 배치에서 이미 M35491-USD로 조회했고 (상장 전이라) 빈 응답을 받은 상황
+    oc._retry_crypto_missing(
+        ["M-USD"], "2021-01-01", "2022-01-01",
+        already_queried={"M-USD": "M35491-USD"},
+    )
+
+    assert "M35491-USD" not in calls, "이미 조회한 심볼을 재조회했다"
+
+
+def test_retry_still_tries_cmc_id_when_main_batch_used_plain_symbol(monkeypatch):
+    """override가 없었던 종목은 기존대로 CMC id 후보를 시도해야 한다."""
+    import data.ohlc_collector as oc
+
+    calls = []
+
+    def _fake_download(symbol, **kwargs):
+        calls.append(symbol)
+        import pandas as pd
+        return pd.DataFrame()
+
+    import yfinance as yf
+    monkeypatch.setattr(yf, "download", _fake_download)
+    monkeypatch.setattr(oc, "_cmc_listing", lambda: {"HYPE": (32196, 54.0)})
+    monkeypatch.setattr(oc, "_search_crypto_yahoo_ticker", lambda sym: None)
+
+    oc._retry_crypto_missing(
+        ["HYPE-USD"], "2026-08-01", "2026-08-13",
+        already_queried={"HYPE-USD": "HYPE-USD"},
+    )
+
+    assert "HYPE32196-USD" in calls
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
