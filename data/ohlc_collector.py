@@ -601,6 +601,26 @@ def _retry_crypto_missing(
     return recovered
 
 
+def purge_targets(symbol_overrides: dict[str, str], failed: list[str]) -> list[str]:
+    """
+    저장 시 기존 행을 통째로 걷어낼 종목 목록.
+
+    ⚠️ 반드시 좁게 잡아야 한다. 유니버스 전체를 무조건 purge하게 만들었더니
+       배치 다운로드가 레이트리밋으로 실패한 종목이 기존 데이터까지 통째로
+       잃었다 — 실제로 crypto 2022년이 161종목에서 33종목으로 줄었다.
+
+    그래서 두 조건을 모두 만족하는 종목만 대상으로 한다.
+      1. 심볼이 잘못됐다고 판명됨 (symbol_overrides에 있음)
+         → 기존에 저장된 데이터가 다른 토큰의 것이므로 지우는 게 맞다.
+      2. 이번 조회가 하드 실패하지 않음
+         → 실패한 종목까지 지우면 "오염된 데이터"가 "데이터 없음"으로 바뀔 뿐이다.
+
+    override가 없는 종목은 기존 행 단위 병합이 그대로 적용되어 데이터가 보존된다.
+    """
+    failed_set = {str(t).strip().upper() for t in failed}
+    return [t for t in symbol_overrides if t.strip().upper() not in failed_set]
+
+
 def build_symbol_overrides(tickers: list[str], probe_days: int = 7) -> dict[str, str]:
     """
     실행 시작 시 1회 호출해 "plain 심볼이 다른 토큰인" 종목의 교체 맵을 만든다.
@@ -894,8 +914,8 @@ def backfill_market(
 
         logger.info(f"[OhlcCollector] {market.upper()} {year}년 수집 중...")
         try:
-            df, _ = fetch_ohlc_range(tickers, start_str, end_str,
-                                      symbol_overrides=symbol_overrides)
+            df, failed_tickers = fetch_ohlc_range(tickers, start_str, end_str,
+                                                   symbol_overrides=symbol_overrides)
         except Exception as e:
             logger.error(f"[OhlcCollector] {market} {year}년 수집 실패: {e}")
             continue
@@ -904,10 +924,11 @@ def backfill_market(
         # 해당 연도엔 데이터가 없다"는 것 자체가 정보이며, 기존에 저장된 잘못된 토큰
         # 데이터를 걷어내야 한다 (ARB 2022년이 정확히 이 경우 — Arbitrum은 2023년
         # 출시라 올바른 심볼에 2022년 데이터가 없는데, 옛 오염 행이 남아 있었다).
+        purge = purge_targets(symbol_overrides, failed_tickers)
         if df.empty:
             logger.warning(f"[OhlcCollector] {market} {year}년 데이터 없음 — 기존 행만 정리")
 
-        ohlc_db.save_year(df, market, year, replace_tickers=tickers)
+        ohlc_db.save_year(df, market, year, replace_tickers=purge)
 
         if "Date" in df.columns and not df.empty:
             all_dates.extend(df["Date"].tolist())

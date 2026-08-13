@@ -76,6 +76,32 @@ def test_replace_tickers_overwrites_with_new_values(db):
     assert float(out["Close"].iloc[0]) == pytest.approx(7.16)
 
 
+def test_purge_scope_excludes_failed_and_non_overridden(db):
+    """
+    purge 대상은 "심볼이 잘못됐다고 판명된 종목" 중 "이번 조회가 하드 실패하지
+    않은 것"으로만 좁혀야 한다.
+
+    ⚠️ 유니버스 전체를 무조건 purge하면 배치 다운로드가 레이트리밋으로 실패했을 때
+       그 50종목이 기존 데이터까지 통째로 잃는다. 실제로 이렇게 crypto 2022년이
+       161종목 → 33종목으로 줄었다.
+    """
+    from data.ohlc_collector import purge_targets
+
+    overrides = {"UNI-USD": "UNI7083-USD", "ARB-USD": "ARB11841-USD"}
+    failed = ["ARB-USD"]
+
+    targets = purge_targets(overrides, failed)
+
+    assert targets == ["UNI-USD"]
+
+
+def test_purge_scope_is_empty_without_overrides(db):
+    """교체 판정이 없으면 아무것도 지우지 않는다 — 기존 병합 동작 유지."""
+    from data.ohlc_collector import purge_targets
+
+    assert purge_targets({}, []) == []
+
+
 def test_without_replace_tickers_behaviour_is_unchanged(db):
     """기존 호출부(행 단위 병합)는 그대로 동작해야 한다."""
     db.save_year(_rows("BTC-USD", ["2022-01-05", "2022-01-06"], 40000.0), "crypto", 2022)
