@@ -603,9 +603,11 @@ def build_symbol_overrides(tickers: list[str], probe_days: int = 7) -> dict[str,
 
     end_dt = date.today() + timedelta(days=1)
     start_dt = end_dt - timedelta(days=probe_days)
+    # 여기서도 _retry_crypto_missing이 그대로 동작한다. plain 심볼이 최근 시세를
+    # 아예 안 주는 종목(예전 토큰이 이미 죽은 경우)은 이 단계에서 CMC id 티커로
+    # 복구되고, 그 결과가 CMC 가격과 맞으므로 override 대상에서 자연히 빠진다.
     probe, _ = fetch_ohlc_range(
         crypto, start_dt.strftime("%Y-%m-%d"), end_dt.strftime("%Y-%m-%d"),
-        _skip_override_check=True,
     )
     if probe.empty:
         logger.warning("[CryptoResolve] 심볼 검증용 시세를 받지 못함 — 교체 없이 진행")
@@ -624,7 +626,6 @@ def fetch_ohlc_range(
     start: str,
     end: str,
     symbol_overrides: Optional[dict[str, str]] = None,
-    _skip_override_check: bool = False,
 ) -> tuple[pd.DataFrame, list[str]]:
     """
     yfinance batch download → flat DataFrame (Ticker | Date | Open | High | Low | Close | Volume)
