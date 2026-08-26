@@ -909,8 +909,17 @@ def backfill_market(
         # crypto 2026 복구 백필에서 유니버스(CMC Top 200)에서 빠진 종목들의 데이터가
         # 이렇게 소실됐다(197종목 → 172종목). update_market()/backfill_new_tickers()는
         # 이미 다운로드를 선행하는데 여기만 빠져 있었다.
+        # 2026-08-20 us 2024 사고(899 → 727종목) 대응. download_year() 는
+        # "Drive 에 없음"과 "다운로드 실패"를 모두 False 로 돌려줘 구분할 수
+        # 없었다. 전자는 새로 쓰는 것이 정상이고 후자는 덮어쓰면 안 된다.
         if not ohlc_db.local_path(market, year).exists():
-            ohlc_db.download_year(market, year)
+            state = ohlc_db.download_year_state(market, year)
+            if state == "failed":
+                logger.error(
+                    f"[OhlcCollector] {market} {year}년 기존 파일 다운로드 실패 "
+                    f"— 덮어쓰지 않고 건너뛴다"
+                )
+                continue
 
         logger.info(f"[OhlcCollector] {market.upper()} {year}년 수집 중...")
         try:
