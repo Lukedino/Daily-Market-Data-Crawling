@@ -216,10 +216,53 @@ def download_year_state(market: str, year: int, uploader=None) -> str:
         return "failed"
 
 
+COVERAGE_DROP_PCT = 10.0
+"""일자별 유니버스 급감 임계. 축소 가드(TICKER_SHRINK_TOLERANCE_PCT)가
+파일 **전체**의 종목 수를 보는 반면, 이것은 파일 **안**의 날짜별 종목 수를
+본다. us_2024 사고는 파일 전체로는 727종목이 멀쩡히 들어 있었지만
+2024-01-02 에 899 -> 704 로 꺼지는 형태였다. 두 검사는 서로를 대체하지
+않는다."""
+
+
+class CoverageGapError(RuntimeError):
+    """연도 파일 안에서 유니버스가 하루 만에 급감하는 경우."""
+
+
+def check_coverage_continuity(df: pd.DataFrame,
+                              drop_pct: float = COVERAGE_DROP_PCT,
+                              min_universe: int = 100) -> dict:
+    """
+    날짜별 고유 종목 수가 전 거래일 대비 drop_pct% 이상 줄어드는 지점을 찾는다.
+
+    소비 측(ML_Market Data Analysis)의 `src/integrity.check_coverage_continuity`
+    와 같은 검사다. 소비자에만 두면 이미 오염된 Drive 를 받은 뒤에야 잡히므로
+    생산자에도 둔다.
+
+    반환: {"ok", "n_bad", "worst_date", "worst_pct", "rows"}
+    """
+    if df.empty or "Date" not in df.columns or "Ticker" not in df.columns:
+        return {"ok": True, "n_bad": 0, "worst_date": None,
+                "worst_pct": 0.0, "rows": pd.DataFrame()}
+
+    n = df.groupby("Date")["Ticker"].nunique().sort_index()
+    prev = n.shift(1)
+    pct = (n - prev) / prev * 100
+    bad = pd.DataFrame({"n": n, "n_prev": prev, "pct": pct})
+    bad = bad[(bad.n_prev >= min_universe) & (bad.pct <= -drop_pct)]
+    return {
+        "ok": len(bad) == 0,
+        "n_bad": len(bad),
+        "worst_date": bad.pct.idxmin() if len(bad) else None,
+        "worst_pct": float(bad.pct.min()) if len(bad) else 0.0,
+        "rows": bad,
+    }
+
+
 def save_year(df: pd.DataFrame, market: str, year: int,
               replace_tickers: Optional[list[str]] = None,
               *,
               allow_shrink: bool = False,
+              allow_gap: bool = False,
               _existing_override: Optional[pd.DataFrame] = None):
     """
     연도별 Parquet 저장.
@@ -324,6 +367,21 @@ def save_year(df: pd.DataFrame, market: str, year: int,
                 f"(허용 {TICKER_SHRINK_TOLERANCE_PCT:.0f}%). "
                 f"Drive 다운로드 실패나 유니버스 축소일 가능성이 높다. "
                 f"의도한 축소라면 allow_shrink=True 로 호출하라."
+            )
+
+    # ── 커버리지 연속성 게이트 ────────────────────────────────────────────
+    # 축소 가드는 파일 전체 종목 수를 본다. 이건 파일 안의 날짜별 종목 수를
+    # 본다. us_2024 사고(2024-01-02 899 -> 704)는 전자를 통과하고 후자에만
+    # 걸린다 — 재수집 결과가 727종목이면 "원래 727이었다"와 구분되지 않기
+    # 때문이다. 생산자에서 막아야 Drive 원본이 오염되지 않는다.
+    if not allow_gap:
+        cov = check_coverage_continuity(df)
+        if not cov["ok"]:
+            raise CoverageGapError(
+                f"{market}_{year} 저장 중단 — 파일 안에서 유니버스가 하루 만에 "
+                f"{cov['worst_pct']:.1f}% 급감한다 ({cov['worst_date']}). "
+                f"총 {cov['n_bad']}일. 수집 누락 가능성이 높다. "
+                f"의도한 것이라면 allow_gap=True 로 호출하라."
             )
 
     table = pa.Table.from_pandas(df, preserve_index=False)
@@ -657,6 +715,21 @@ def save_sector_meta(df: pd.DataFrame, market: str):
                 f"(허용 {TICKER_SHRINK_TOLERANCE_PCT:.0f}%). "
                 f"Drive 다운로드 실패나 유니버스 축소일 가능성이 높다. "
                 f"의도한 축소라면 allow_shrink=True 로 호출하라."
+            )
+
+    # ── 커버리지 연속성 게이트 ────────────────────────────────────────────
+    # 축소 가드는 파일 전체 종목 수를 본다. 이건 파일 안의 날짜별 종목 수를
+    # 본다. us_2024 사고(2024-01-02 899 -> 704)는 전자를 통과하고 후자에만
+    # 걸린다 — 재수집 결과가 727종목이면 "원래 727이었다"와 구분되지 않기
+    # 때문이다. 생산자에서 막아야 Drive 원본이 오염되지 않는다.
+    if not allow_gap:
+        cov = check_coverage_continuity(df)
+        if not cov["ok"]:
+            raise CoverageGapError(
+                f"{market}_{year} 저장 중단 — 파일 안에서 유니버스가 하루 만에 "
+                f"{cov['worst_pct']:.1f}% 급감한다 ({cov['worst_date']}). "
+                f"총 {cov['n_bad']}일. 수집 누락 가능성이 높다. "
+                f"의도한 것이라면 allow_gap=True 로 호출하라."
             )
 
     table = pa.Table.from_pandas(df, preserve_index=False)

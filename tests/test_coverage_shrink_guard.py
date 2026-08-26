@@ -219,3 +219,73 @@ class TestDownloadYearState:
                 return None
         monkeypatch.setattr(db, "_get_uploader", lambda u=None: U())
         assert db.download_year_state("us", 2024) == "ok"
+
+
+class TestCoverageContinuityGate:
+    """
+    ④ 생산자 게이트 — 파일 **안**에서 유니버스가 하루 만에 꺼지는 것을 막는다.
+
+    축소 가드(TICKER_SHRINK_TOLERANCE_PCT)와 서로를 대체하지 않는다.
+    us_2024 사고는 파일 전체로는 727종목이 멀쩡히 들어 있었고,
+    2024-01-02 에 899 -> 704 로 꺼지는 형태였다. 재수집 결과가 727 이면
+    "원래 727이었다"와 구분되지 않아 축소 가드는 통과한다.
+    """
+
+    def _panel(self, dates, tickers, price=100.0):
+        rows = []
+        for t in tickers:
+            rows.append(_rows(t, dates, price))
+        return pd.concat(rows, ignore_index=True)
+
+    def test_threshold_is_ten_percent(self, db):
+        assert db.COVERAGE_DROP_PCT == 10.0
+
+    def test_stable_universe_passes(self, db):
+        d = ["2024-01-02", "2024-01-03", "2024-01-04"]
+        u = [f"T{i:04d}" for i in range(200)]
+        db.save_year(self._panel(d, u), "us", 2024)
+        assert db.load_year("us", 2024)["Ticker"].nunique() == 200
+
+    def test_us_2024_intra_file_drop_is_blocked(self, db):
+        """실제 사고 형태 — 파일 안에서 899 -> 704."""
+        d1 = ["2023-12-27", "2023-12-28", "2023-12-29"]
+        d2 = ["2024-01-02", "2024-01-03"]
+        keep = [f"K{i:04d}" for i in range(704)]
+        gone = [f"G{i:04d}" for i in range(195)]
+        df = pd.concat([self._panel(d1, keep + gone), self._panel(d2, keep)],
+                       ignore_index=True)
+        with pytest.raises(db.CoverageGapError) as e:
+            db.save_year(df, "us", 2024)
+        assert "2024-01-02" in str(e.value)
+
+    def test_shrink_guard_would_have_passed_this(self, db):
+        """
+        같은 프레임이 축소 가드는 통과한다는 것을 명시적으로 고정한다.
+        두 검사가 서로를 대체하지 않는 이유다.
+        """
+        d1 = ["2023-12-27", "2023-12-28", "2023-12-29"]
+        d2 = ["2024-01-02", "2024-01-03"]
+        keep = [f"K{i:04d}" for i in range(704)]
+        gone = [f"G{i:04d}" for i in range(195)]
+        df = pd.concat([self._panel(d1, keep + gone), self._panel(d2, keep)],
+                       ignore_index=True)
+        db.save_year(df, "us", 2024, allow_gap=True)      # 게이트만 끈다
+        assert db.load_year("us", 2024)["Ticker"].nunique() == 899
+
+    def test_allow_gap_escape_hatch(self, db):
+        d1 = ["2024-01-02", "2024-01-03"]
+        d2 = ["2024-01-04"]
+        keep = [f"K{i:04d}" for i in range(150)]
+        gone = [f"G{i:04d}" for i in range(100)]
+        df = pd.concat([self._panel(d1, keep + gone), self._panel(d2, keep)],
+                       ignore_index=True)
+        db.save_year(df, "us", 2024, allow_gap=True)
+        assert db.load_year("us", 2024)["Ticker"].nunique() == 250
+
+    def test_small_universe_is_skipped(self, db):
+        d1 = ["2024-01-02"]
+        d2 = ["2024-01-03"]
+        df = pd.concat([self._panel(d1, ["A", "B", "C"]),
+                        self._panel(d2, ["A"])], ignore_index=True)
+        db.save_year(df, "us", 2024)
+        assert db.load_year("us", 2024)["Ticker"].nunique() == 3
