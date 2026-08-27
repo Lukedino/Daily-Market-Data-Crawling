@@ -28,7 +28,7 @@
 
 - [ ] **Step 1: 스크래치 검증 스크립트 작성 (구현 전 — 실패 확인용)**
 
-`C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_luke_picks_market_filter.py` 파일을 아래 내용으로 작성한다.
+`%LOCALAPPDATA%\..\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_luke_picks_market_filter.py` 파일을 아래 내용으로 작성한다.
 
 ```python
 import io
@@ -36,7 +36,7 @@ import os
 import sys
 from unittest.mock import patch, MagicMock
 
-sys.path.insert(0, r"C:\Users\Luke Skywalker\Desktop\Luke 작업공간\[Claude Code] Daily-Market-Data-Crawling")
+sys.path.insert(0, r"<USER_HOME>\Desktop\Luke 작업공간\[Claude Code] Daily-Market-Data-Crawling")
 
 import pandas as pd
 from data import ohlc_collector
@@ -95,7 +95,7 @@ print("ALL OK")
 
 - [ ] **Step 2: 실행해서 실패 확인**
 
-Run: `python "C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_luke_picks_market_filter.py"`
+Run: `python "%LOCALAPPDATA%\..\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_luke_picks_market_filter.py"`
 Expected: `AssertionError: FAIL case1: [...]` (현재는 `구분` 컬럼을 무시하고 6개 전부 반환하므로 `005930`/`247540`/`BTC`가 섞여 있어 실패)
 
 - [ ] **Step 3: `data/ohlc_collector.py` 수정**
@@ -136,14 +136,14 @@ mimeType 분기로 `df`를 확보하는 코드(165~178번째 줄) 바로 다음,
 
 - [ ] **Step 4: 실행해서 통과 확인**
 
-Run: `python "C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_luke_picks_market_filter.py"`
+Run: `python "%LOCALAPPDATA%\..\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_luke_picks_market_filter.py"`
 Expected: 두 케이스 모두 `OK`, 마지막에 `ALL OK`
 
 - [ ] **Step 5: 스크래치 스크립트 삭제 후 커밋**
 
 ```bash
-rm "/c/Users/LUKESK~1/AppData/Local/Temp/claude/C--Users-Luke-Skywalker/c1a1746b-776d-4dbc-978e-8e7d8265329c/scratchpad/test_luke_picks_market_filter.py"
-cd "/c/Users/Luke Skywalker/Desktop/Luke 작업공간/[Claude Code] Daily-Market-Data-Crawling"
+rm "<SCRATCHPAD>/c1a1746b-776d-4dbc-978e-8e7d8265329c/scratchpad/test_luke_picks_market_filter.py"
+cd "<WORKSPACE>/[Claude Code] Daily-Market-Data-Crawling"
 git add data/ohlc_collector.py
 git commit -m "$(cat <<'EOF'
 Filter Luke Picks Drive file to US/ETF rows when a 구분 column exists
@@ -173,7 +173,7 @@ EOF
 
 - [ ] **Step 1: 스크래치 검증 스크립트 작성 (구현 전 — 실패 확인용)**
 
-`C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_fetch_ohlc_range_retry.py`:
+`%LOCALAPPDATA%\..\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_fetch_ohlc_range_retry.py`:
 
 `fetch_ohlc_range()`는 `yfinance`를 함수 내부에서 `import yfinance as yf`로
 지역 import한다(모듈 상단에 `yf`라는 이름이 없음). 따라서
@@ -186,7 +186,7 @@ EOF
 import sys
 from unittest.mock import patch, MagicMock
 
-sys.path.insert(0, r"C:\Users\Luke Skywalker\Desktop\Luke 작업공간\[Claude Code] Daily-Market-Data-Crawling")
+sys.path.insert(0, r"<USER_HOME>\Desktop\Luke 작업공간\[Claude Code] Daily-Market-Data-Crawling")
 
 import pandas as pd
 from yfinance.exceptions import YFRateLimitError
@@ -256,7 +256,7 @@ print("ALL OK")
 
 - [ ] **Step 2: 실행해서 실패 확인**
 
-Run: `python "C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_fetch_ohlc_range_retry.py"`
+Run: `python "%LOCALAPPDATA%\..\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_fetch_ohlc_range_retry.py"`
 Expected: `AssertionError: FAIL case(a) call count: 1` (현재는 재시도 없이 한 번만 시도하고 실패 처리하므로)
 
 - [ ] **Step 3: `data/ohlc_collector.py` 수정**
@@ -358,14 +358,14 @@ _CMC_TOP_N  = 200  # CoinMarketCap 상위 N개
 
 - [ ] **Step 4: 실행해서 통과 확인**
 
-Run: `python "C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_fetch_ohlc_range_retry.py"`
+Run: `python "%LOCALAPPDATA%\..\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_fetch_ohlc_range_retry.py"`
 Expected: 3개 케이스 모두 `OK`, 마지막에 `ALL OK`
 
 - [ ] **Step 5: 스크래치 스크립트 삭제 후 커밋**
 
 ```bash
-rm "/c/Users/LUKESK~1/AppData/Local/Temp/claude/C--Users-Luke-Skywalker/c1a1746b-776d-4dbc-978e-8e7d8265329c/scratchpad/test_fetch_ohlc_range_retry.py"
-cd "/c/Users/Luke Skywalker/Desktop/Luke 작업공간/[Claude Code] Daily-Market-Data-Crawling"
+rm "<SCRATCHPAD>/c1a1746b-776d-4dbc-978e-8e7d8265329c/scratchpad/test_fetch_ohlc_range_retry.py"
+cd "<WORKSPACE>/[Claude Code] Daily-Market-Data-Crawling"
 git add data/ohlc_collector.py
 git commit -m "$(cat <<'EOF'
 Retry yfinance batch downloads with backoff instead of dropping them

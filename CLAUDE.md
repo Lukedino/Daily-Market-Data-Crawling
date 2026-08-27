@@ -13,8 +13,8 @@ US 주식/ETF, 크립토, KR(한국) 시장 OHLC + 재무데이터를 수집해 
 
 ### 루트 폴더
 - `GDRIVE_OHLC_FOLDER_ID` = `[Database] Market Crawling Data` 폴더 ID
-- GCP 프로젝트: `seraphic-jet-489008-b4`
-- Service Account: `stock-crawler-bot@seraphic-jet-489008-b4.iam.gserviceaccount.com`
+- GCP 프로젝트: (GitHub Secrets / 로컬 .env 참조 — 공개 저장소라 기재하지 않음)
+- Service Account: (동일 — `GOOGLE_APPLICATION_CREDENTIALS` Secret 의 client_email)
 
 ### 서브폴더 구조
 ```

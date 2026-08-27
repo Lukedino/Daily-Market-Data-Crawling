@@ -6,7 +6,7 @@ scripts/setup_oauth.py -- Google Drive OAuth2 토큰 최초 발급 스크립트
 
 사전 준비:
   1. GCP Console (https://console.cloud.google.com) 접속
-     프로젝트: seraphic-jet-489008-b4
+     프로젝트: <GCP_PROJECT_ID>
   2. APIs & Services -> Credentials -> CREATE CREDENTIALS -> OAuth client ID
   3. Application type: Desktop App (이름 임의)
   4. 다운로드한 JSON 파일을 이 프로젝트 루트에 oauth_client_secret.json 으로 저장

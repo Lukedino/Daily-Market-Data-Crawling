@@ -29,14 +29,14 @@
 
 - [ ] **Step 1: 스크래치 검증 스크립트 작성 (구현 전 — 실패 확인용)**
 
-`C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_list_known_tickers.py` 파일을 아래 내용으로 작성한다.
+`%LOCALAPPDATA%\..\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_list_known_tickers.py` 파일을 아래 내용으로 작성한다.
 
 ```python
 import sys
 import shutil
 from pathlib import Path
 
-sys.path.insert(0, r"C:\Users\Luke Skywalker\Desktop\Luke 작업공간\[Claude Code] Daily-Market-Data-Crawling")
+sys.path.insert(0, r"<USER_HOME>\Desktop\Luke 작업공간\[Claude Code] Daily-Market-Data-Crawling")
 
 import pandas as pd
 import pyarrow as pa
@@ -44,7 +44,7 @@ import pyarrow.parquet as pq
 
 from data import ohlc_db
 
-TMP_ROOT = Path(r"C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\ohlc_db_test")
+TMP_ROOT = Path(r"%LOCALAPPDATA%\..\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\ohlc_db_test")
 shutil.rmtree(TMP_ROOT, ignore_errors=True)
 TMP_ROOT.mkdir(parents=True)
 
@@ -78,7 +78,7 @@ shutil.rmtree(TMP_ROOT, ignore_errors=True)
 
 - [ ] **Step 2: 실행해서 실패 확인**
 
-Run: `python "C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_list_known_tickers.py"`
+Run: `python "%LOCALAPPDATA%\..\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_list_known_tickers.py"`
 Expected: `AttributeError: module 'data.ohlc_db' has no attribute 'list_known_tickers'`
 
 - [ ] **Step 3: `data/ohlc_db.py`에 함수 구현**
@@ -124,14 +124,14 @@ def list_known_tickers(market: str) -> set[str]:
 
 - [ ] **Step 4: 실행해서 통과 확인**
 
-Run: `python "C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_list_known_tickers.py"`
+Run: `python "%LOCALAPPDATA%\..\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_list_known_tickers.py"`
 Expected: `OK: {'AAPL', 'MSFT'}`
 
 - [ ] **Step 5: 스크래치 스크립트 삭제 후 커밋**
 
 ```bash
-rm "/c/Users/LUKESK~1/AppData/Local/Temp/claude/C--Users-Luke-Skywalker/c1a1746b-776d-4dbc-978e-8e7d8265329c/scratchpad/test_list_known_tickers.py"
-cd "/c/Users/Luke Skywalker/Desktop/Luke 작업공간/[Claude Code] Daily-Market-Data-Crawling"
+rm "<SCRATCHPAD>/c1a1746b-776d-4dbc-978e-8e7d8265329c/scratchpad/test_list_known_tickers.py"
+cd "<WORKSPACE>/[Claude Code] Daily-Market-Data-Crawling"
 git add data/ohlc_db.py
 git commit -m "$(cat <<'EOF'
 Add list_known_tickers() to detect tickers never collected before
@@ -158,14 +158,14 @@ EOF
 
 - [ ] **Step 1: 스크래치 검증 스크립트 작성 (구현 전 — 실패 확인용)**
 
-`C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_backfill_new_tickers.py` 파일을 아래 내용으로 작성한다.
+`%LOCALAPPDATA%\..\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_backfill_new_tickers.py` 파일을 아래 내용으로 작성한다.
 
 ```python
 import sys
 from datetime import date
 from unittest.mock import patch
 
-sys.path.insert(0, r"C:\Users\Luke Skywalker\Desktop\Luke 작업공간\[Claude Code] Daily-Market-Data-Crawling")
+sys.path.insert(0, r"<USER_HOME>\Desktop\Luke 작업공간\[Claude Code] Daily-Market-Data-Crawling")
 
 import pandas as pd
 from data import ohlc_collector
@@ -207,7 +207,7 @@ print("OK:", result)
 
 - [ ] **Step 2: 실행해서 실패 확인**
 
-Run: `python "C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_backfill_new_tickers.py"`
+Run: `python "%LOCALAPPDATA%\..\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_backfill_new_tickers.py"`
 Expected: `AttributeError: module 'data.ohlc_collector' has no attribute 'backfill_new_tickers'`
 
 - [ ] **Step 3: `data/ohlc_collector.py`에 함수 구현**
@@ -324,14 +324,14 @@ def backfill_new_tickers(
 
 - [ ] **Step 4: 실행해서 통과 확인**
 
-Run: `python "C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_backfill_new_tickers.py"`
+Run: `python "%LOCALAPPDATA%\..\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_backfill_new_tickers.py"`
 Expected: `OK: ['NEWCO']`
 
 - [ ] **Step 5: 스크래치 스크립트 삭제 후 커밋**
 
 ```bash
-rm "/c/Users/LUKESK~1/AppData/Local/Temp/claude/C--Users-Luke-Skywalker/c1a1746b-776d-4dbc-978e-8e7d8265329c/scratchpad/test_backfill_new_tickers.py"
-cd "/c/Users/Luke Skywalker/Desktop/Luke 작업공간/[Claude Code] Daily-Market-Data-Crawling"
+rm "<SCRATCHPAD>/c1a1746b-776d-4dbc-978e-8e7d8265329c/scratchpad/test_backfill_new_tickers.py"
+cd "<WORKSPACE>/[Claude Code] Daily-Market-Data-Crawling"
 git add data/ohlc_collector.py
 git commit -m "$(cat <<'EOF'
 Add backfill_new_tickers() to catch up history for newly added tickers
@@ -358,14 +358,14 @@ EOF
 
 - [ ] **Step 1: 스크래치 검증 스크립트 작성 (구현 전 — 실패 확인용)**
 
-`C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_run_ohlc_update_order.py`:
+`%LOCALAPPDATA%\..\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_run_ohlc_update_order.py`:
 
 ```python
 import sys
 import argparse
 from unittest.mock import patch
 
-sys.path.insert(0, r"C:\Users\Luke Skywalker\Desktop\Luke 작업공간\[Claude Code] Daily-Market-Data-Crawling")
+sys.path.insert(0, r"<USER_HOME>\Desktop\Luke 작업공간\[Claude Code] Daily-Market-Data-Crawling")
 
 import main
 
@@ -390,7 +390,7 @@ print("OK:", call_order)
 
 - [ ] **Step 2: 실행해서 실패 확인**
 
-Run: `python "C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_run_ohlc_update_order.py"`
+Run: `python "%LOCALAPPDATA%\..\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_run_ohlc_update_order.py"`
 Expected: `AssertionError: FAIL: ['update_market']` (현재는 `backfill_new_tickers` 호출이 없으므로)
 
 - [ ] **Step 3: `main.py`의 `run_ohlc_update` 수정**
@@ -425,14 +425,14 @@ def run_ohlc_update(args):
 
 - [ ] **Step 4: 실행해서 통과 확인**
 
-Run: `python "C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_run_ohlc_update_order.py"`
+Run: `python "%LOCALAPPDATA%\..\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_run_ohlc_update_order.py"`
 Expected: `OK: ['backfill_new_tickers', 'update_market']`
 
 - [ ] **Step 5: 스크래치 스크립트 삭제 후 커밋**
 
 ```bash
-rm "/c/Users/LUKESK~1/AppData/Local/Temp/claude/C--Users-Luke-Skywalker/c1a1746b-776d-4dbc-978e-8e7d8265329c/scratchpad/test_run_ohlc_update_order.py"
-cd "/c/Users/Luke Skywalker/Desktop/Luke 작업공간/[Claude Code] Daily-Market-Data-Crawling"
+rm "<SCRATCHPAD>/c1a1746b-776d-4dbc-978e-8e7d8265329c/scratchpad/test_run_ohlc_update_order.py"
+cd "<WORKSPACE>/[Claude Code] Daily-Market-Data-Crawling"
 git add main.py
 git commit -m "$(cat <<'EOF'
 Auto-backfill new tickers before daily incremental OHLC update
@@ -459,7 +459,7 @@ EOF
 
 - [ ] **Step 1: 스크래치 검증 스크립트 작성 (구현 전 — 실패 확인용)**
 
-`C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_ohlc_new_backfill_mode.py`:
+`%LOCALAPPDATA%\..\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_ohlc_new_backfill_mode.py`:
 
 ```python
 import subprocess
@@ -467,7 +467,7 @@ import sys
 
 result = subprocess.run(
     [sys.executable, "main.py", "--mode", "ohlc-new-backfill", "--market", "us", "--dry-run"],
-    cwd=r"C:\Users\Luke Skywalker\Desktop\Luke 작업공간\[Claude Code] Daily-Market-Data-Crawling",
+    cwd=r"<USER_HOME>\Desktop\Luke 작업공간\[Claude Code] Daily-Market-Data-Crawling",
     capture_output=True, text=True,
 )
 assert result.returncode == 0, f"FAIL rc={result.returncode}\nstderr={result.stderr}"
@@ -479,7 +479,7 @@ print("OK: exit 0, dry-run 로그 확인됨")
 
 - [ ] **Step 2: 실행해서 실패 확인**
 
-Run: `python "C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_ohlc_new_backfill_mode.py"`
+Run: `python "%LOCALAPPDATA%\..\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_ohlc_new_backfill_mode.py"`
 Expected: `AssertionError` — `argparse`가 `ohlc-new-backfill`을 모르는 `--mode` 값으로 거부 (`invalid choice`), returncode 2
 
 - [ ] **Step 3: `main.py`에 신규 모드 추가**
@@ -542,14 +542,14 @@ def run_ohlc_new_backfill(args):
 
 - [ ] **Step 4: 실행해서 통과 확인**
 
-Run: `python "C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_ohlc_new_backfill_mode.py"`
+Run: `python "%LOCALAPPDATA%\..\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_ohlc_new_backfill_mode.py"`
 Expected: `OK: exit 0, dry-run 로그 확인됨`
 
 - [ ] **Step 5: 스크래치 스크립트 삭제 후 커밋**
 
 ```bash
-rm "/c/Users/LUKESK~1/AppData/Local/Temp/claude/C--Users-Luke-Skywalker/c1a1746b-776d-4dbc-978e-8e7d8265329c/scratchpad/test_ohlc_new_backfill_mode.py"
-cd "/c/Users/Luke Skywalker/Desktop/Luke 작업공간/[Claude Code] Daily-Market-Data-Crawling"
+rm "<SCRATCHPAD>/c1a1746b-776d-4dbc-978e-8e7d8265329c/scratchpad/test_ohlc_new_backfill_mode.py"
+cd "<WORKSPACE>/[Claude Code] Daily-Market-Data-Crawling"
 git add main.py
 git commit -m "$(cat <<'EOF'
 Add ohlc-new-backfill CLI mode for on-demand new-ticker catch-up
@@ -666,7 +666,7 @@ Expected: 로그에 `[DryRun] US 신규 종목 백필 시뮬레이션` 출력, �
 - [ ] **Step 5: 커밋**
 
 ```bash
-cd "/c/Users/Luke Skywalker/Desktop/Luke 작업공간/[Claude Code] Daily-Market-Data-Crawling"
+cd "<WORKSPACE>/[Claude Code] Daily-Market-Data-Crawling"
 git add .github/workflows/ohlc-new-ticker-backfill.yml CLAUDE.md
 git commit -m "$(cat <<'EOF'
 Add ohlc-new-ticker-backfill GHA workflow for on-demand catch-up

@@ -30,18 +30,18 @@
 
 - [x] **Step 1: 스크래치 검증 스크립트 작성 (구현 전 — 실패 확인용)**
 
-`C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_pending_storage.py` 파일을 아래 내용으로 작성한다.
+`%LOCALAPPDATA%\..\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_pending_storage.py` 파일을 아래 내용으로 작성한다.
 
 ```python
 import sys
 import shutil
 from pathlib import Path
 
-sys.path.insert(0, r"C:\Users\Luke Skywalker\Desktop\Luke 작업공간\[Claude Code] Daily-Market-Data-Crawling")
+sys.path.insert(0, r"<USER_HOME>\Desktop\Luke 작업공간\[Claude Code] Daily-Market-Data-Crawling")
 
 from data import ohlc_db
 
-TMP_ROOT = Path(r"C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\pending_test")
+TMP_ROOT = Path(r"%LOCALAPPDATA%\..\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\pending_test")
 shutil.rmtree(TMP_ROOT, ignore_errors=True)
 TMP_ROOT.mkdir(parents=True)
 
@@ -65,7 +65,7 @@ print("ALL OK")
 
 - [x] **Step 2: 실행해서 실패 확인**
 
-Run: `python "C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_pending_storage.py"`
+Run: `python "%LOCALAPPDATA%\..\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_pending_storage.py"`
 Expected: `AttributeError: module 'data.ohlc_db' has no attribute 'load_pending'`
 
 - [x] **Step 3: `data/ohlc_db.py` 수정**
@@ -150,14 +150,14 @@ def upload_pending(uploader=None):
 
 - [x] **Step 4: 실행해서 통과 확인**
 
-Run: `python "C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_pending_storage.py"`
+Run: `python "%LOCALAPPDATA%\..\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_pending_storage.py"`
 Expected: 2개 케이스 모두 `OK`, 마지막에 `ALL OK`
 
 - [x] **Step 5: 스크래치 스크립트 삭제 후 커밋**
 
 ```bash
-rm "/c/Users/LUKESK~1/AppData/Local/Temp/claude/C--Users-Luke-Skywalker/c1a1746b-776d-4dbc-978e-8e7d8265329c/scratchpad/test_pending_storage.py"
-cd "/c/Users/Luke Skywalker/Desktop/Luke 작업공간/[Claude Code] Daily-Market-Data-Crawling"
+rm "<SCRATCHPAD>/c1a1746b-776d-4dbc-978e-8e7d8265329c/scratchpad/test_pending_storage.py"
+cd "<WORKSPACE>/[Claude Code] Daily-Market-Data-Crawling"
 git add data/ohlc_db.py
 git commit -m "$(cat <<'EOF'
 Add backfill_pending.json storage/Drive sync helpers
@@ -186,13 +186,13 @@ EOF
 
 - [x] **Step 1: 스크래치 검증 스크립트 작성 (구현 전 — 실패 확인용)**
 
-`C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_fetch_ohlc_range_failed_return.py`:
+`%LOCALAPPDATA%\..\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_fetch_ohlc_range_failed_return.py`:
 
 ```python
 import sys
 from unittest.mock import patch
 
-sys.path.insert(0, r"C:\Users\Luke Skywalker\Desktop\Luke 작업공간\[Claude Code] Daily-Market-Data-Crawling")
+sys.path.insert(0, r"<USER_HOME>\Desktop\Luke 작업공간\[Claude Code] Daily-Market-Data-Crawling")
 
 from data import ohlc_collector
 
@@ -225,7 +225,7 @@ print("ALL OK")
 
 - [x] **Step 2: 실행해서 실패 확인**
 
-Run: `python "C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_fetch_ohlc_range_failed_return.py"`
+Run: `python "%LOCALAPPDATA%\..\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_fetch_ohlc_range_failed_return.py"`
 Expected: `TypeError: cannot unpack non-iterable DataFrame object` (현재 `fetch_ohlc_range`는 DataFrame 하나만 반환하므로 `df, failed = ...` 언패킹이 실패)
 
 - [x] **Step 3: `data/ohlc_collector.py` 수정**
@@ -286,7 +286,7 @@ def fetch_ohlc_range(tickers: list[str], start: str, end: str) -> tuple[pd.DataF
 
 - [x] **Step 4: 실행해서 통과 확인**
 
-Run: `python "C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_fetch_ohlc_range_failed_return.py"`
+Run: `python "%LOCALAPPDATA%\..\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_fetch_ohlc_range_failed_return.py"`
 Expected: 2개 케이스 모두 `OK`, 마지막에 `ALL OK`
 
 추가로 `backfill_market()`/`update_market()`가 여전히 정상 임포트/실행되는지 스모크 확인:
@@ -297,8 +297,8 @@ Expected: 에러 없이 종료 (dry-run이므로 실제 fetch는 호출되지 �
 - [x] **Step 5: 스크래치 스크립트 삭제 후 커밋**
 
 ```bash
-rm "/c/Users/LUKESK~1/AppData/Local/Temp/claude/C--Users-Luke-Skywalker/c1a1746b-776d-4dbc-978e-8e7d8265329c/scratchpad/test_fetch_ohlc_range_failed_return.py"
-cd "/c/Users/Luke Skywalker/Desktop/Luke 작업공간/[Claude Code] Daily-Market-Data-Crawling"
+rm "<SCRATCHPAD>/c1a1746b-776d-4dbc-978e-8e7d8265329c/scratchpad/test_fetch_ohlc_range_failed_return.py"
+cd "<WORKSPACE>/[Claude Code] Daily-Market-Data-Crawling"
 git add data/ohlc_collector.py
 git commit -m "$(cat <<'EOF'
 Return hard-failed tickers from fetch_ohlc_range()
@@ -330,14 +330,14 @@ EOF
 
 - [x] **Step 1: 스크래치 검증 스크립트 작성 (구현 전 — 실패 확인용)**
 
-`C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_backfill_pending_retry.py`:
+`%LOCALAPPDATA%\..\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_backfill_pending_retry.py`:
 
 ```python
 import sys
 from datetime import date
 from unittest.mock import patch
 
-sys.path.insert(0, r"C:\Users\Luke Skywalker\Desktop\Luke 작업공간\[Claude Code] Daily-Market-Data-Crawling")
+sys.path.insert(0, r"<USER_HOME>\Desktop\Luke 작업공간\[Claude Code] Daily-Market-Data-Crawling")
 
 import pandas as pd
 from data import ohlc_collector
@@ -416,7 +416,7 @@ print("ALL OK")
 
 - [x] **Step 2: 실행해서 실패 확인**
 
-Run: `python "C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_backfill_pending_retry.py"`
+Run: `python "%LOCALAPPDATA%\..\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_backfill_pending_retry.py"`
 Expected: `AssertionError: FAIL case(a): known-but-pending ticker not retried: []` (현재 코드는 `known`이면 무조건 제외하므로 TSM이 candidates에서 빠짐)
 
 - [x] **Step 3: `data/ohlc_collector.py`의 `backfill_new_tickers()` 전체 교체**
@@ -563,7 +563,7 @@ def backfill_new_tickers(
 
 - [x] **Step 4: 실행해서 통과 확인**
 
-Run: `python "C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_backfill_pending_retry.py"`
+Run: `python "%LOCALAPPDATA%\..\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_backfill_pending_retry.py"`
 Expected: 2개 케이스 모두 `OK`, 마지막에 `ALL OK`
 
 추가로 CLI 스모크 테스트:
@@ -577,8 +577,8 @@ Expected: 에러 없이 종료 (Task 2의 튜플 언패킹 변경이 `update_mar
 - [x] **Step 5: 스크래치 스크립트 삭제 후 커밋**
 
 ```bash
-rm "/c/Users/LUKESK~1/AppData/Local/Temp/claude/C--Users-Luke-Skywalker/c1a1746b-776d-4dbc-978e-8e7d8265329c/scratchpad/test_backfill_pending_retry.py"
-cd "/c/Users/Luke Skywalker/Desktop/Luke 작업공간/[Claude Code] Daily-Market-Data-Crawling"
+rm "<SCRATCHPAD>/c1a1746b-776d-4dbc-978e-8e7d8265329c/scratchpad/test_backfill_pending_retry.py"
+cd "<WORKSPACE>/[Claude Code] Daily-Market-Data-Crawling"
 git add data/ohlc_collector.py
 git commit -m "$(cat <<'EOF'
 Retry hard-failed backfill tickers via backfill_pending.json

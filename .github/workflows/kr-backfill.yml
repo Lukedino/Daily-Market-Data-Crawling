@@ -16,6 +16,9 @@ on:
         type: boolean
         default: false
 
+permissions:
+  contents: read
+
 jobs:
   kr-backfill:
     runs-on: ubuntu-latest
@@ -31,12 +34,21 @@ jobs:
         run: pip install -r requirements.txt
       - name: KR Backfill
         env:
+          START_DATE:                  ${{ inputs.start_date }}
+          END_DATE:                    ${{ inputs.end_date }}
+          DRY_RUN:                     ${{ inputs.dry_run }}
           GDRIVE_OHLC_FOLDER_ID:       ${{ secrets.GDRIVE_OHLC_FOLDER_ID }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_APPLICATION_CREDENTIALS }}
+        # 2026-08-27 보안점검: workflow_dispatch 입력을 run: 에 직접 보간하지 않고
+        # env 로 받아 형식 검증 후 배열 인자로 전달 (스크립트 인젝션 차단)
         run: |
-          ARGS="--mode kr-backfill --upload-drive --start-date ${{ inputs.start_date }} --end-date ${{ inputs.end_date }}"
-          ${{ inputs.dry_run || 'false' }} && ARGS="$ARGS --dry-run"
-          python main.py $ARGS
+          set -euo pipefail
+          [[ "$START_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || { echo "invalid start_date: $START_DATE"; exit 1; }
+          [[ -z "$END_DATE" || "$END_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || { echo "invalid end_date: $END_DATE"; exit 1; }
+          ARGS=(--mode kr-backfill --upload-drive --start-date "$START_DATE")
+          [[ -n "$END_DATE" ]] && ARGS+=(--end-date "$END_DATE")
+          [[ "$DRY_RUN" == "true" ]] && ARGS+=(--dry-run)
+          python main.py "${ARGS[@]}"
       - name: Upload log
         if: always()
         uses: actions/upload-artifact@v4

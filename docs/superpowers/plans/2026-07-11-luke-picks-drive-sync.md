@@ -29,7 +29,7 @@
 
 - [ ] **Step 1: 스크래치 검증 스크립트 작성 (구현 전 — 실패 확인용)**
 
-`C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_luke_picks_drive.py` 파일을 아래 내용으로 작성한다.
+`%LOCALAPPDATA%\..\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_luke_picks_drive.py` 파일을 아래 내용으로 작성한다.
 
 ```python
 import io
@@ -37,7 +37,7 @@ import sys
 import os
 from unittest.mock import patch, MagicMock
 
-sys.path.insert(0, r"C:\Users\Luke Skywalker\Desktop\Luke 작업공간\[Claude Code] Daily-Market-Data-Crawling")
+sys.path.insert(0, r"<USER_HOME>\Desktop\Luke 작업공간\[Claude Code] Daily-Market-Data-Crawling")
 
 from data import ohlc_collector
 
@@ -110,7 +110,7 @@ print("ALL OK")
 
 - [ ] **Step 2: 실행해서 실패 확인**
 
-Run: `python "C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_luke_picks_drive.py"`
+Run: `python "%LOCALAPPDATA%\..\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_luke_picks_drive.py"`
 Expected: `AttributeError: module 'data.ohlc_collector' has no attribute '_load_luke_picks_from_drive'`
 
 - [ ] **Step 3: `data/ohlc_collector.py` 수정**
@@ -214,14 +214,14 @@ def _load_luke_picks_from_drive() -> list[str]:
 
 - [ ] **Step 4: 실행해서 통과 확인**
 
-Run: `python "C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_luke_picks_drive.py"`
+Run: `python "%LOCALAPPDATA%\..\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_luke_picks_drive.py"`
 Expected: 4개 케이스 모두 `OK` 출력, 마지막에 `ALL OK`
 
 - [ ] **Step 5: 스크래치 스크립트 삭제 후 커밋**
 
 ```bash
-rm "/c/Users/LUKESK~1/AppData/Local/Temp/claude/C--Users-Luke-Skywalker/c1a1746b-776d-4dbc-978e-8e7d8265329c/scratchpad/test_luke_picks_drive.py"
-cd "/c/Users/Luke Skywalker/Desktop/Luke 작업공간/[Claude Code] Daily-Market-Data-Crawling"
+rm "<SCRATCHPAD>/c1a1746b-776d-4dbc-978e-8e7d8265329c/scratchpad/test_luke_picks_drive.py"
+cd "<WORKSPACE>/[Claude Code] Daily-Market-Data-Crawling"
 git add data/ohlc_collector.py
 git commit -m "$(cat <<'EOF'
 Load Luke Picks from Drive instead of a local-only file
@@ -257,17 +257,17 @@ EOF
 
 - [ ] **Step 1: 스크래치 검증 스크립트 작성 (구현 전 — 실패 확인용)**
 
-`C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_workflow_secrets.py`:
+`%LOCALAPPDATA%\..\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_workflow_secrets.py`:
 
 ```python
 import yaml
 
 files = [
-    r"C:\Users\Luke Skywalker\Desktop\Luke 작업공간\[Claude Code] Daily-Market-Data-Crawling\.github\workflows\ohlc-daily.yml",
-    r"C:\Users\Luke Skywalker\Desktop\Luke 작업공간\[Claude Code] Daily-Market-Data-Crawling\.github\workflows\ohlc-backfill.yml",
-    r"C:\Users\Luke Skywalker\Desktop\Luke 작업공간\[Claude Code] Daily-Market-Data-Crawling\.github\workflows\ohlc-new-ticker-backfill.yml",
-    r"C:\Users\Luke Skywalker\Desktop\Luke 작업공간\[Claude Code] Daily-Market-Data-Crawling\.github\workflows\sector-meta.yml",
-    r"C:\Users\Luke Skywalker\Desktop\Luke 작업공간\[Claude Code] Daily-Market-Data-Crawling\.github\workflows\financials-update.yml",
+    r"<USER_HOME>\Desktop\Luke 작업공간\[Claude Code] Daily-Market-Data-Crawling\.github\workflows\ohlc-daily.yml",
+    r"<USER_HOME>\Desktop\Luke 작업공간\[Claude Code] Daily-Market-Data-Crawling\.github\workflows\ohlc-backfill.yml",
+    r"<USER_HOME>\Desktop\Luke 작업공간\[Claude Code] Daily-Market-Data-Crawling\.github\workflows\ohlc-new-ticker-backfill.yml",
+    r"<USER_HOME>\Desktop\Luke 작업공간\[Claude Code] Daily-Market-Data-Crawling\.github\workflows\sector-meta.yml",
+    r"<USER_HOME>\Desktop\Luke 작업공간\[Claude Code] Daily-Market-Data-Crawling\.github\workflows\financials-update.yml",
 ]
 
 for path in files:
@@ -289,7 +289,7 @@ print("ALL OK")
 
 - [ ] **Step 2: 실행해서 실패 확인**
 
-Run: `python "C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_workflow_secrets.py"`
+Run: `python "%LOCALAPPDATA%\..\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_workflow_secrets.py"`
 Expected: 첫 파일(`ohlc-daily.yml`)에서 `AssertionError: FAIL missing secret ref in ...`
 
 - [ ] **Step 3: 5개 워크플로우 파일 수정**
@@ -352,7 +352,7 @@ Expected: 첫 파일(`ohlc-daily.yml`)에서 `AssertionError: FAIL missing secre
 
 - [ ] **Step 4: 실행해서 통과 확인**
 
-Run: `python "C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_workflow_secrets.py"`
+Run: `python "%LOCALAPPDATA%\..\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_workflow_secrets.py"`
 Expected: 5개 파일 모두 `OK: ...` 출력, 마지막에 `ALL OK`
 
 추가로 각 파일의 YAML 문법이 깨지지 않았는지 별도 확인:
@@ -363,8 +363,8 @@ Expected: `YAML OK`
 - [ ] **Step 5: 스크래치 스크립트 삭제 후 커밋**
 
 ```bash
-rm "/c/Users/LUKESK~1/AppData/Local/Temp/claude/C--Users-Luke-Skywalker/c1a1746b-776d-4dbc-978e-8e7d8265329c/scratchpad/test_workflow_secrets.py"
-cd "/c/Users/Luke Skywalker/Desktop/Luke 작업공간/[Claude Code] Daily-Market-Data-Crawling"
+rm "<SCRATCHPAD>/c1a1746b-776d-4dbc-978e-8e7d8265329c/scratchpad/test_workflow_secrets.py"
+cd "<WORKSPACE>/[Claude Code] Daily-Market-Data-Crawling"
 git add .github/workflows/ohlc-daily.yml .github/workflows/ohlc-backfill.yml .github/workflows/ohlc-new-ticker-backfill.yml .github/workflows/sector-meta.yml .github/workflows/financials-update.yml
 git commit -m "$(cat <<'EOF'
 Wire GDRIVE_LUKE_PICKS_FILE_ID into all US-universe workflows
@@ -391,10 +391,10 @@ EOF
 
 - [ ] **Step 1: 반영 확인용 스크래치 체크 작성**
 
-`C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_claude_md_secret_row.py`:
+`%LOCALAPPDATA%\..\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_claude_md_secret_row.py`:
 
 ```python
-path = r"C:\Users\Luke Skywalker\Desktop\Luke 작업공간\[Claude Code] Daily-Market-Data-Crawling\CLAUDE.md"
+path = r"<USER_HOME>\Desktop\Luke 작업공간\[Claude Code] Daily-Market-Data-Crawling\CLAUDE.md"
 with open(path, encoding="utf-8") as f:
     text = f.read()
 
@@ -410,7 +410,7 @@ print("OK: secret row present, no ticker names leaked")
 
 - [ ] **Step 2: 실행해서 실패 확인**
 
-Run: `python "C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_claude_md_secret_row.py"`
+Run: `python "%LOCALAPPDATA%\..\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_claude_md_secret_row.py"`
 Expected: `AssertionError: FAIL: secret row missing`
 
 - [ ] **Step 3: `CLAUDE.md` 수정**
@@ -430,14 +430,14 @@ Expected: `AssertionError: FAIL: secret row missing`
 
 - [ ] **Step 4: 실행해서 통과 확인**
 
-Run: `python "C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_claude_md_secret_row.py"`
+Run: `python "%LOCALAPPDATA%\..\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\c1a1746b-776d-4dbc-978e-8e7d8265329c\scratchpad\test_claude_md_secret_row.py"`
 Expected: `OK: secret row present, no ticker names leaked`
 
 - [ ] **Step 5: 스크래치 스크립트 삭제 후 커밋**
 
 ```bash
-rm "/c/Users/LUKESK~1/AppData/Local/Temp/claude/C--Users-Luke-Skywalker/c1a1746b-776d-4dbc-978e-8e7d8265329c/scratchpad/test_claude_md_secret_row.py"
-cd "/c/Users/Luke Skywalker/Desktop/Luke 작업공간/[Claude Code] Daily-Market-Data-Crawling"
+rm "<SCRATCHPAD>/c1a1746b-776d-4dbc-978e-8e7d8265329c/scratchpad/test_claude_md_secret_row.py"
+cd "<WORKSPACE>/[Claude Code] Daily-Market-Data-Crawling"
 git add CLAUDE.md
 git commit -m "$(cat <<'EOF'
 Document GDRIVE_LUKE_PICKS_FILE_ID secret at the same disclosure level as existing secrets

@@ -34,3 +34,10 @@ build/
 
 # ── Claude Code worktrees ──────────────────────────────────────
 .claude/worktrees/
+
+# ── 2026-08-27 보안점검: 토큰/자격증명 일반 패턴 + Claude Code 로컬 설정 ──
+token*.json
+credentials*.json
+*service*account*.json
+.claude/settings.local.json
+.superpowers/

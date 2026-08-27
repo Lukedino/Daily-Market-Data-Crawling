@@ -45,7 +45,7 @@
 
 - [x] **Step 1: 스크래치 검증 스크립트 작성 (구현 전 — 실패 확인용)**
 
-`C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\fc92b968-9d81-4ad8-b785-85992094b4aa\scratchpad\test_first_seen_dates.py` 파일을 아래 내용으로 작성한다.
+`%LOCALAPPDATA%\..\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\fc92b968-9d81-4ad8-b785-85992094b4aa\scratchpad\test_first_seen_dates.py` 파일을 아래 내용으로 작성한다.
 
 ```python
 import sys
@@ -53,7 +53,7 @@ import shutil
 from pathlib import Path
 from datetime import date
 
-sys.path.insert(0, r"C:\Users\Luke Skywalker\Desktop\Luke 작업공간\[Claude Code] Daily-Market-Data-Crawling")
+sys.path.insert(0, r"<USER_HOME>\Desktop\Luke 작업공간\[Claude Code] Daily-Market-Data-Crawling")
 
 import pandas as pd
 import pyarrow as pa
@@ -61,7 +61,7 @@ import pyarrow.parquet as pq
 
 from data import ohlc_db
 
-TMP_ROOT = Path(r"C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\fc92b968-9d81-4ad8-b785-85992094b4aa\scratchpad\first_seen_test")
+TMP_ROOT = Path(r"%LOCALAPPDATA%\..\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\fc92b968-9d81-4ad8-b785-85992094b4aa\scratchpad\first_seen_test")
 shutil.rmtree(TMP_ROOT, ignore_errors=True)
 TMP_ROOT.mkdir(parents=True)
 
@@ -91,7 +91,7 @@ print("ALL OK")
 
 - [x] **Step 2: 실행해서 실패 확인**
 
-Run: `python "C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\fc92b968-9d81-4ad8-b785-85992094b4aa\scratchpad\test_first_seen_dates.py"`
+Run: `python "%LOCALAPPDATA%\..\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\fc92b968-9d81-4ad8-b785-85992094b4aa\scratchpad\test_first_seen_dates.py"`
 Expected: `AttributeError: module 'data.ohlc_db' has no attribute 'first_seen_dates'`
 
 - [x] **Step 3: `data/ohlc_db.py`에 함수 추가**
@@ -130,14 +130,14 @@ def first_seen_dates(market: str) -> dict[str, date]:
 
 - [x] **Step 4: 실행해서 통과 확인**
 
-Run: `python "C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\fc92b968-9d81-4ad8-b785-85992094b4aa\scratchpad\test_first_seen_dates.py"`
+Run: `python "%LOCALAPPDATA%\..\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\fc92b968-9d81-4ad8-b785-85992094b4aa\scratchpad\test_first_seen_dates.py"`
 Expected: `OK: {...}` 출력 후 `ALL OK`
 
 - [x] **Step 5: 스크래치 스크립트 삭제 후 커밋**
 
 ```bash
-rm "/c/Users/LUKESK~1/AppData/Local/Temp/claude/C--Users-Luke-Skywalker/fc92b968-9d81-4ad8-b785-85992094b4aa/scratchpad/test_first_seen_dates.py"
-cd "/c/Users/Luke Skywalker/Desktop/Luke 작업공간/[Claude Code] Daily-Market-Data-Crawling"
+rm "<SCRATCHPAD>/fc92b968-9d81-4ad8-b785-85992094b4aa/scratchpad/test_first_seen_dates.py"
+cd "<WORKSPACE>/[Claude Code] Daily-Market-Data-Crawling"
 git add data/ohlc_db.py
 git commit -m "$(cat <<'EOF'
 Add first_seen_dates() to find each ticker's earliest collection date
@@ -174,15 +174,15 @@ EOF
 
 - [x] **Step 1: 스크래치 검증 스크립트 작성 (구현 전 — 실패 확인용)**
 
-`C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\fc92b968-9d81-4ad8-b785-85992094b4aa\scratchpad\test_verify_ohlc_report.py`:
+`%LOCALAPPDATA%\..\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\fc92b968-9d81-4ad8-b785-85992094b4aa\scratchpad\test_verify_ohlc_report.py`:
 
 ```python
 import sys
 from unittest.mock import patch
 from datetime import date
 
-sys.path.insert(0, r"C:\Users\Luke Skywalker\Desktop\Luke 작업공간\[Claude Code] Daily-Market-Data-Crawling")
-sys.path.insert(0, r"C:\Users\Luke Skywalker\Desktop\Luke 작업공간\[Claude Code] Daily-Market-Data-Crawling\scripts")
+sys.path.insert(0, r"<USER_HOME>\Desktop\Luke 작업공간\[Claude Code] Daily-Market-Data-Crawling")
+sys.path.insert(0, r"<USER_HOME>\Desktop\Luke 작업공간\[Claude Code] Daily-Market-Data-Crawling\scripts")
 
 import verify_ohlc
 
@@ -205,7 +205,7 @@ print("ALL OK")
 
 - [x] **Step 2: 실행해서 실패 확인**
 
-Run: `python "C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\fc92b968-9d81-4ad8-b785-85992094b4aa\scratchpad\test_verify_ohlc_report.py"`
+Run: `python "%LOCALAPPDATA%\..\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\fc92b968-9d81-4ad8-b785-85992094b4aa\scratchpad\test_verify_ohlc_report.py"`
 Expected: `ModuleNotFoundError: No module named 'verify_ohlc'`
 
 - [x] **Step 3: `scripts/verify_ohlc.py` 작성**
@@ -359,7 +359,7 @@ if __name__ == "__main__":
 
 - [x] **Step 4: 실행해서 통과 확인**
 
-Run: `python "C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\fc92b968-9d81-4ad8-b785-85992094b4aa\scratchpad\test_verify_ohlc_report.py"`
+Run: `python "%LOCALAPPDATA%\..\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\fc92b968-9d81-4ad8-b785-85992094b4aa\scratchpad\test_verify_ohlc_report.py"`
 Expected: `OK: {...}` 출력 후 `ALL OK`
 
 추가로 CLI 스모크 테스트 (프로젝트 루트에서, 실제 로컬 데이터로 리포트가
@@ -372,8 +372,8 @@ Expected: 에러 없이 종료, `[US]` 섹션과 요약 출력 (로컬에 `data/
 - [x] **Step 5: 스크래치 스크립트 삭제 후 커밋**
 
 ```bash
-rm "/c/Users/LUKESK~1/AppData/Local/Temp/claude/C--Users-Luke-Skywalker/fc92b968-9d81-4ad8-b785-85992094b4aa/scratchpad/test_verify_ohlc_report.py"
-cd "/c/Users/Luke Skywalker/Desktop/Luke 작업공간/[Claude Code] Daily-Market-Data-Crawling"
+rm "<SCRATCHPAD>/fc92b968-9d81-4ad8-b785-85992094b4aa/scratchpad/test_verify_ohlc_report.py"
+cd "<WORKSPACE>/[Claude Code] Daily-Market-Data-Crawling"
 git add scripts/verify_ohlc.py
 git commit -m "$(cat <<'EOF'
 Add scripts/verify_ohlc.py to report tickers with suspiciously recent backfill
@@ -407,14 +407,14 @@ EOF
 
 - [x] **Step 1: 스크래치 검증 스크립트 작성 (구현 전 — 실패 확인용)**
 
-`C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\fc92b968-9d81-4ad8-b785-85992094b4aa\scratchpad\test_verify_ohlc_fix.py`:
+`%LOCALAPPDATA%\..\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\fc92b968-9d81-4ad8-b785-85992094b4aa\scratchpad\test_verify_ohlc_fix.py`:
 
 ```python
 import sys
 from unittest.mock import patch
 
-sys.path.insert(0, r"C:\Users\Luke Skywalker\Desktop\Luke 작업공간\[Claude Code] Daily-Market-Data-Crawling")
-sys.path.insert(0, r"C:\Users\Luke Skywalker\Desktop\Luke 작업공간\[Claude Code] Daily-Market-Data-Crawling\scripts")
+sys.path.insert(0, r"<USER_HOME>\Desktop\Luke 작업공간\[Claude Code] Daily-Market-Data-Crawling")
+sys.path.insert(0, r"<USER_HOME>\Desktop\Luke 작업공간\[Claude Code] Daily-Market-Data-Crawling\scripts")
 
 import verify_ohlc
 
@@ -442,7 +442,7 @@ print("ALL OK")
 
 - [x] **Step 2: 실행해서 실패 확인**
 
-Run: `python "C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\fc92b968-9d81-4ad8-b785-85992094b4aa\scratchpad\test_verify_ohlc_fix.py"`
+Run: `python "%LOCALAPPDATA%\..\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\fc92b968-9d81-4ad8-b785-85992094b4aa\scratchpad\test_verify_ohlc_fix.py"`
 Expected: `AttributeError: module 'verify_ohlc' has no attribute 'apply_fix'`
 
 - [x] **Step 3: `scripts/verify_ohlc.py`에 `apply_fix()` 추가 + `main()` 배선**
@@ -505,7 +505,7 @@ def apply_fix(results: list[dict]):
 
 - [x] **Step 4: 실행해서 통과 확인**
 
-Run: `python "C:\Users\LUKESK~1\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\fc92b968-9d81-4ad8-b785-85992094b4aa\scratchpad\test_verify_ohlc_fix.py"`
+Run: `python "%LOCALAPPDATA%\..\AppData\Local\Temp\claude\C--Users-Luke-Skywalker\fc92b968-9d81-4ad8-b785-85992094b4aa\scratchpad\test_verify_ohlc_fix.py"`
 Expected: `OK: {...}` 출력 후 `ALL OK`
 
 추가로 CLI 인자 파싱만 스모크 확인 (실제 Drive 업로드는 하지 않음 — `--fix`
@@ -517,8 +517,8 @@ Expected: `--fix` 옵션이 도움말에 나열되고 에러 없이 종료
 - [x] **Step 5: 스크래치 스크립트 삭제 후 커밋**
 
 ```bash
-rm "/c/Users/LUKESK~1/AppData/Local/Temp/claude/C--Users-Luke-Skywalker/fc92b968-9d81-4ad8-b785-85992094b4aa/scratchpad/test_verify_ohlc_fix.py"
-cd "/c/Users/Luke Skywalker/Desktop/Luke 작업공간/[Claude Code] Daily-Market-Data-Crawling"
+rm "<SCRATCHPAD>/fc92b968-9d81-4ad8-b785-85992094b4aa/scratchpad/test_verify_ohlc_fix.py"
+cd "<WORKSPACE>/[Claude Code] Daily-Market-Data-Crawling"
 git add scripts/verify_ohlc.py
 git commit -m "$(cat <<'EOF'
 Add --fix to verify_ohlc.py to merge new candidates into backfill_pending.json
