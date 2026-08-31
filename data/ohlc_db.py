@@ -693,43 +693,40 @@ def sector_meta_path(market: str) -> Path:
     return local_dir(market) / f"{market}_sector_meta.parquet"
 
 
-def save_sector_meta(df: pd.DataFrame, market: str):
-    """sector_meta parquet 저장 (덮어쓰기)."""
+def save_sector_meta(df: pd.DataFrame, market: str, allow_shrink: bool = False):
+    """sector_meta parquet 저장 (덮어쓰기).
+
+    2026-08-31 수정: 040e7eb 가 save_year() 의 축소 가드를 복붙하면서 그 함수의
+    지역변수(_exempt·prior_n·allow_shrink·year·allow_gap)를 그대로 참조해, 비어 있지 않은
+    df 를 저장하는 순간 NameError — sector-meta 주간 수집이 08-30부터 전멸했다.
+    sector_meta 는 날짜 축이 없는 종목 메타이므로:
+      - 축소 가드: 기존 parquet 의 고유 종목 수와 비교해 자체 구현 (취지는 동일)
+      - 날짜별 커버리지 연속성 게이트: 적용 대상 아님 → 제거
+    """
     if df.empty:
         logger.warning(f"[OhlcDB] sector_meta 빈 DataFrame → 저장 건너뜀: {market}")
         return
     path = sector_meta_path(market)
     path.parent.mkdir(parents=True, exist_ok=True)
-    # ── 축소 가드 ────────────────────────────────────────────────────────
-    if "Ticker" in df.columns:
-        _t = df["Ticker"].astype(str).str.strip().str.upper()
-        new_n = int(_t[~_t.isin(_exempt)].nunique()) if _exempt else int(_t.nunique())
-    else:
-        new_n = None
+
+    # ── 축소 가드 — 작은 결과가 큰 파일을 덮어쓰지 못하게 ────────────────
+    prior_n = 0
+    if path.exists():
+        try:
+            prior = pd.read_parquet(path, columns=["Ticker"])
+            prior_n = int(prior["Ticker"].astype(str).str.strip().str.upper().nunique())
+        except Exception as e:
+            logger.warning(f"[OhlcDB] sector_meta 기존 파일 검사 실패({e!r}) — 가드 없이 진행")
+    new_n = (int(df["Ticker"].astype(str).str.strip().str.upper().nunique())
+             if "Ticker" in df.columns else None)
     if prior_n and new_n is not None and not allow_shrink:
         floor = prior_n * (1.0 - TICKER_SHRINK_TOLERANCE_PCT / 100.0)
         if new_n < floor:
             raise CoverageShrinkError(
-                f"{market}_{year} 저장 중단 — 종목 수가 {prior_n:,}개에서 "
+                f"{market} sector_meta 저장 중단 — 종목 수가 {prior_n:,}개에서 "
                 f"{new_n:,}개로 {(1 - new_n / prior_n) * 100:.1f}% 줄어든다 "
-                f"(허용 {TICKER_SHRINK_TOLERANCE_PCT:.0f}%). "
-                f"Drive 다운로드 실패나 유니버스 축소일 가능성이 높다. "
+                f"(허용 {TICKER_SHRINK_TOLERANCE_PCT:.0f}%). 수집 실패 가능성이 높다. "
                 f"의도한 축소라면 allow_shrink=True 로 호출하라."
-            )
-
-    # ── 커버리지 연속성 게이트 ────────────────────────────────────────────
-    # 축소 가드는 파일 전체 종목 수를 본다. 이건 파일 안의 날짜별 종목 수를
-    # 본다. us_2024 사고(2024-01-02 899 -> 704)는 전자를 통과하고 후자에만
-    # 걸린다 — 재수집 결과가 727종목이면 "원래 727이었다"와 구분되지 않기
-    # 때문이다. 생산자에서 막아야 Drive 원본이 오염되지 않는다.
-    if not allow_gap:
-        cov = check_coverage_continuity(df)
-        if not cov["ok"]:
-            raise CoverageGapError(
-                f"{market}_{year} 저장 중단 — 파일 안에서 유니버스가 하루 만에 "
-                f"{cov['worst_pct']:.1f}% 급감한다 ({cov['worst_date']}). "
-                f"총 {cov['n_bad']}일. 수집 누락 가능성이 높다. "
-                f"의도한 것이라면 allow_gap=True 로 호출하라."
             )
 
     table = pa.Table.from_pandas(df, preserve_index=False)
