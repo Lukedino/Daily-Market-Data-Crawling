@@ -1,17 +1,19 @@
+# 2026-08-31 보안점검 ⑦: CI 러너에 시크릿이 주입되므로 공급망 방어를 위해 버전을 고정한다.
+# 기준 = 최근 성공한 CI 가 실제 설치한 버전(실측). 올릴 때는 의도적으로 수정 후 테스트·CI 확인.
 pykrx==1.2.4
-yfinance>=0.2.40
-finance-datareader>=0.9.0
-OpenDartReader>=0.2.0
-requests>=2.31.0
-beautifulsoup4>=4.12.0
-lxml>=4.9.0
-pandas>=2.0.0
-numpy>=1.24.0
-pyarrow>=12.0.0
-duckdb>=0.9.0
-google-api-python-client>=2.100.0
-google-auth>=2.23.0
-google-auth-httplib2>=0.1.1
-google-auth-oauthlib>=1.0.0
-tqdm>=4.65.0
-python-dotenv>=1.0.0
+yfinance==1.7.0
+finance-datareader==0.9.202
+OpenDartReader==0.2.2
+requests==2.34.2
+beautifulsoup4==4.15.0
+lxml==6.1.2
+pandas==2.3.3
+numpy==1.26.4
+pyarrow==25.0.1
+duckdb==1.5.5
+google-api-python-client==2.199.0
+google-auth==2.57.0
+google-auth-httplib2==0.4.2
+google-auth-oauthlib==1.4.1
+tqdm==4.70.0
+python-dotenv==1.2.3
