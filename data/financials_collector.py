@@ -88,6 +88,7 @@ def _fetch_quarterly_financials(ticker: str) -> pd.DataFrame:
         "Operating Income":   "OperatingIncome",
         "Net Income":         "NetIncome",
         "EBITDA":             "EBITDA",
+        "Diluted EPS":        "DilutedEPS",   # 섹터리더 2단계 — 분기 연속 EPS 성장 판정 재료 (2026-09-01)
     }
     balance_map = {
         "Total Assets":                           "TotalAssets",
@@ -190,6 +191,8 @@ def _fetch_ratios_snapshot(ticker: str, snap_date: date) -> dict:
         "ROA":               _pct(info.get("returnOnAssets")),
         "DebtToEquity":      _val(info.get("debtToEquity")),
         "Beta":              _val(info.get("beta")),
+        # 섹터리더 2단계 — 기관 보유비율(%): 스냅샷 누적으로 증가 추세 판정 (2026-09-01)
+        "HeldPctInstitutions": _pct(info.get("heldPercentInstitutions")),
         "DividendYield":     _pct(info.get("dividendYield")),
         "EPS":               _val(info.get("trailingEps")),
         "ProfitMargin":      _pct(info.get("profitMargins")),

@@ -44,7 +44,7 @@ _LOCAL_ROOT = Path(config.LOCAL_DATA_DIR) / "ohlc_db"
 # ── 스키마 컬럼 정의 ──────────────────────────────────────────────────────────
 _FINANCIALS_COLS = [
     "Ticker", "PeriodDate", "Year", "Quarter",
-    "Revenue", "GrossProfit", "OperatingIncome", "NetIncome", "EBITDA",
+    "Revenue", "GrossProfit", "OperatingIncome", "NetIncome", "EBITDA", "DilutedEPS",
     "TotalAssets", "TotalLiabilities", "Equity",
     "OperatingCashFlow", "FreeCashFlow", "CapEx",
     "SnapDate",
@@ -54,7 +54,7 @@ _RATIOS_COLS = [
     "Ticker", "SnapDate", "Name", "Sector", "Industry",
     "MarketCap", "SharesOutstanding",
     "PE", "ForwardPE", "PB", "PS",
-    "ROE", "ROA", "DebtToEquity", "Beta",
+    "ROE", "ROA", "DebtToEquity", "Beta", "HeldPctInstitutions",
     "DividendYield", "EPS", "ProfitMargin", "OperatingMargin",
     "RevenueGrowth", "EarningsGrowth", "CurrentRatio",
 ]
