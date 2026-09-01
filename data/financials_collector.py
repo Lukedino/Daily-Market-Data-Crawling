@@ -231,6 +231,11 @@ def collect_us_financials(
     if tickers is None:
         tickers = load_tickers("us")
 
+    # Drive 기존 파일 선다운로드 — absent(최초 실행)면 정상 진행, failed 면 덮어쓰기 방지를 위해 중단
+    # (이 선다운로드가 없으면 save→upload 가 이번 실행분만으로 Drive 를 덮어쓴다 — 2026-09-01 결함 수정)
+    if upload:
+        financials_db.ensure_drive_baseline("us")
+
     logger.info(f"[FinancialsCollector] US 재무 데이터 수집 시작: {len(tickers)}종목")
 
     snap_date = date.today()
@@ -340,6 +345,10 @@ def collect_crypto_ratios(
         _tqdm = tqdm
     except ImportError:
         _tqdm = None
+
+    # Drive 기존 파일 선다운로드 — absent(최초 실행)면 정상 진행, failed 면 덮어쓰기 방지를 위해 중단
+    if upload:
+        financials_db.ensure_drive_baseline("crypto", kinds=("ratios",))
 
     snap_date = date.today()
     logger.info(f"[FinancialsCollector] Crypto ratios 수집 시작 (CMC Top {_CMC_TOP_N})")

@@ -349,3 +349,49 @@ def download_ratios_all(market: str, uploader=None):
         logger.info(f"[FinancialsDB] {market} ratios 전체 다운로드 완료")
     except Exception as e:
         logger.error(f"[FinancialsDB] {market} ratios 다운로드 실패: {e}")
+
+
+# ── Drive 베이스라인 (2026-09-01) ─────────────────────────────────────────
+# save_*() 는 로컬 파일하고만 병합한다. GHA 러너는 매 실행 빈 파일시스템에서 시작하는데
+# 수집 경로 어디에도 선다운로드가 없어, upload_*() 가 이번 실행분만으로 Drive 기존 파일을
+# 덮어썼다(ratios 는 실행당 SnapDate 1개라 스냅샷 이력이 매번 전멸 — 실측 SnapDate 1개뿐).
+# 위의 download_*_all() 은 존재했지만 아무도 호출하지 않았고, 오류를 삼켜 "원격에 없음"과
+# "다운로드 실패"를 구분하지 못한다 — 실패인 채 진행하면 그대로 덮어쓴다.
+
+
+def _baseline_remote_and_local(market: str, kind: str):
+    """kind('financials'|'ratios')의 Drive 경로와 로컬 폴더. DRIVE_PATHS 미설정이면 remote=None."""
+    if kind == "financials":
+        remote = config.DRIVE_PATHS.get("us_financials")
+    elif market == "us":
+        remote = config.DRIVE_PATHS.get("us_ratios")
+    else:
+        remote = config.DRIVE_PATHS.get("crypto_ratios")
+    return remote, _LOCAL_ROOT / market / kind
+
+
+def ensure_drive_baseline(market: str, kinds=("financials", "ratios"), uploader=None):
+    """수집 시작 전 Drive 기존 파일을 로컬로 내려받아 병합 기반을 만든다.
+
+    ohlc_db.download_year_state 와 동일한 3상태 철학:
+      absent → 최초 실행, 새로 쓰는 것이 정상. 진행
+      failed → 기존 데이터가 있는지조차 모른다. 덮어쓰기 방지를 위해 RuntimeError 로 중단
+    uploader 초기화 실패(None)·DRIVE_PATHS 미설정은 upload_*() 도 전부 건너뛰어
+    Drive 가 안전하므로 경고만 남기고 진행한다.
+    """
+    u = _get_uploader(uploader)
+    if u is None:
+        logger.warning("[FinancialsDB] uploader 없음 → 베이스라인 다운로드 건너뜀 (업로드도 안 되므로 안전)")
+        return
+    for kind in kinds:
+        remote, local_d = _baseline_remote_and_local(market, kind)
+        if not remote:
+            logger.warning(f"[FinancialsDB] DRIVE_PATHS 미설정 → {market}/{kind} 베이스라인 건너뜀 (업로드도 안 됨)")
+            continue
+        state = u.download_all_state(remote, str(local_d), extensions=(".parquet",))
+        if state == "failed":
+            raise RuntimeError(
+                f"[FinancialsDB] Drive 기존 {market}/{kind} 다운로드 실패 — "
+                f"이대로 진행하면 이번 실행분이 Drive 를 덮어쓴다. 중단"
+            )
+        logger.info(f"[FinancialsDB] 베이스라인 {market}/{kind}: {state}")

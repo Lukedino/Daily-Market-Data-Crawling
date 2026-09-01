@@ -280,6 +280,49 @@ class DriveUploader:
                 except Exception as e:
                     logger.error(f"[Drive] {f['name']} 다운로드 실패: {e}")
 
+    def download_all_state(self, remote_subfolder: str, local_dir: str,
+                           extensions: tuple = (".parquet",)) -> str:
+        """download_all 과 같되 결과를 세 상태로 구분한다 (2026-09-01, financials 베이스라인용).
+
+          "ok"      하나 이상 내려받았다
+          "absent"  원격 폴더에 대상 파일이 없다 (최초 실행 — 새로 쓰는 것이 정상)
+          "failed"  목록 조회·다운로드 중 실패 (**이대로 저장→업로드하면 덮어쓴다**)
+
+        download_all() 은 파일별 실패를 로그만 남기고 삼켜 두 경우를 구분할 수 없다 —
+        ohlc_db.download_year_state 가 같은 이유로 존재한다 (us 2024 사고 구멍 A).
+        """
+        try:
+            service   = self._get_service()
+            folder_id = self._get_or_create_folder(remote_subfolder)
+            resp = service.files().list(
+                q=f"'{folder_id}' in parents and trashed=false",
+                fields="files(id, name)",
+                spaces="drive",
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True,
+            ).execute()
+            files = [f for f in resp.get("files", [])
+                     if any(f["name"].endswith(ext) for ext in extensions)]
+        except Exception as e:
+            logger.error(f"[Drive] {remote_subfolder} 목록 조회 실패: {e}")
+            return "failed"
+
+        if not files:
+            return "absent"
+
+        Path(local_dir).mkdir(parents=True, exist_ok=True)
+        for f in files:
+            try:
+                self.download(
+                    remote_subfolder=remote_subfolder,
+                    filename=f["name"],
+                    local_path=str(Path(local_dir) / f["name"]),
+                )
+            except Exception as e:
+                logger.error(f"[Drive] {f['name']} 다운로드 실패: {e}")
+                return "failed"
+        return "ok"
+
     # ── 전체 업로드 (수집 완료 후 일괄) ──────────────────────────────────────
 
     def sync_all_local(self):
