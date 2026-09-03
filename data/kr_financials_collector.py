@@ -34,18 +34,19 @@ def _parse_amount(v) -> Optional[float]:
     if not s or s == "-":
         return None
     try:
-        return float(s)
+        val = float(s)
     except ValueError:
         return None
+    return None if val != val else val   # NaN check (NaN != NaN is True)
 
 
 def extract_cumulative_accounts(df) -> Optional[dict]:
     """finstate 응답 df → 누적 손익 dict. 손익계산서(sj_div IS/CIS) 행만 사용.
     thstrm_add_amount(분기보고서의 누적)가 있으면 우선, 없으면 thstrm_amount
     (반기·사업보고서는 thstrm_amount가 누적/연간) — 이 규칙 하나로 전 보고서 커버."""
-    if df is None or len(df) == 0:
+    if df is None or len(df) == 0 or "sj_div" not in df.columns:
         return None
-    rows = df[df.get("sj_div", pd.Series(dtype=str)).isin(["IS", "CIS"])]
+    rows = df[df["sj_div"].isin(["IS", "CIS"])]
     if rows.empty:
         return None
     names = rows["account_nm"].astype(str).str.strip()
@@ -100,6 +101,8 @@ def compute_eps(net_income, stocks) -> Optional[float]:
     try:
         ni, st = float(net_income), float(stocks)
     except (TypeError, ValueError):
+        return None
+    if ni != ni or st != st:   # NaN check
         return None
     if st <= 0:
         return None

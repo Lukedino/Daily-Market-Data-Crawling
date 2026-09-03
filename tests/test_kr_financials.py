@@ -66,6 +66,22 @@ class TestExtractCumulativeAccounts:
         assert extract_cumulative_accounts(None) is None
         assert extract_cumulative_accounts(pd.DataFrame()) is None
 
+    def test_missing_sj_div_column_returns_none(self):
+        # sj_div 컬럼 자체가 없는 응답 → 예외가 아니라 None (판정불가 강등)
+        df = _finstate_df([{"account_nm": "매출액", "thstrm_amount": "100", "thstrm_add_amount": ""}])
+        assert extract_cumulative_accounts(df) is None
+
+    def test_nan_add_amount_falls_back_to_thstrm(self):
+        # add_amount가 NaN이면 thstrm_amount 폴백이 살아야 한다
+        df = _finstate_df([{"sj_div": "IS", "account_nm": "매출액",
+                            "thstrm_amount": "900", "thstrm_add_amount": float("nan")}])
+        assert extract_cumulative_accounts(df)["Revenue"] == 900.0
+
+    def test_nan_amount_is_none(self):
+        df = _finstate_df([{"sj_div": "IS", "account_nm": "매출액",
+                            "thstrm_amount": float("nan"), "thstrm_add_amount": ""}])
+        assert extract_cumulative_accounts(df)["Revenue"] is None
+
 
 class TestDeriveQuarters:
     def _cums(self, q1, h1, q3, fy):
@@ -132,6 +148,10 @@ class TestComputeEps:
         assert compute_eps(1_000_000, None) is None
         assert compute_eps(1_000_000, 0) is None
         assert compute_eps(None, 1_000) is None
+
+    def test_nan_inputs_none(self):
+        assert compute_eps(float("nan"), 1_000) is None
+        assert compute_eps(1_000_000, float("nan")) is None
 
 
 class TestRequiredReports:
