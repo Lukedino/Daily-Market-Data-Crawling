@@ -148,3 +148,56 @@ def test_upload_financials_kr_drive_path(fdb):
     u = _UploadRecordingUploader()
     fdb.upload_financials("kr", [2026], uploader=u)
     assert u.uploaded == ["kr/financials"]
+
+
+# ── 수집 함수 배선 — KR (Task 3, 최종 리뷰 반영) ────────────────────
+
+
+def _kr_baseline_setup(monkeypatch, tmp_path):
+    """collect_kr_financials가 실제 I/O 없이 돌게 하는 공통 스텁 (financials_db._LOCAL_ROOT
+    격리 + kr_db.download_year/load_year 1종목 marcap 스텁 + upload_financials no-op)."""
+    from data import financials_db, kr_db
+
+    monkeypatch.setattr(financials_db, "_LOCAL_ROOT", tmp_path / "ohlc_db")
+    monkeypatch.setattr(financials_db, "upload_financials", lambda *a, **k: None)
+    monkeypatch.setattr(kr_db, "download_year", lambda year, uploader=None: True)
+    from datetime import date as _d
+    marcap = pd.DataFrame({
+        "Code": ["005930"], "Marcap": [500], "Stocks": [100],
+        "Date": [_d(2026, 9, 3)],
+    })
+    monkeypatch.setattr(kr_db, "load_year", lambda year: marcap)
+
+
+class _EmptyDart:
+    """finstate가 항상 응답 없음 — 실네트워크·실계정 없이 배선만 검증."""
+
+    def finstate(self, code, year, reprt_code="11011"):
+        return None
+
+
+def test_collector_kr_calls_baseline_before_save(monkeypatch, tmp_path):
+    from data import kr_financials_collector as kfc, financials_db
+
+    calls = []
+    _kr_baseline_setup(monkeypatch, tmp_path)
+    monkeypatch.setattr(financials_db, "ensure_drive_baseline",
+                        lambda market, kinds=("financials", "ratios"), uploader=None:
+                        calls.append((market, tuple(kinds))))
+    monkeypatch.setattr(kfc, "_SLEEP_SEC", 0)
+
+    kfc.collect_kr_financials(top_n=10, upload=True, dart=_EmptyDart(), years=[2026])
+    assert calls == [("kr", ("financials",))]
+
+
+def test_collector_kr_skips_baseline_without_upload(monkeypatch, tmp_path):
+    from data import kr_financials_collector as kfc, financials_db
+
+    calls = []
+    _kr_baseline_setup(monkeypatch, tmp_path)
+    monkeypatch.setattr(financials_db, "ensure_drive_baseline",
+                        lambda *a, **k: calls.append(a))
+    monkeypatch.setattr(kfc, "_SLEEP_SEC", 0)
+
+    kfc.collect_kr_financials(top_n=10, upload=False, dart=_EmptyDart(), years=[2026])
+    assert calls == []

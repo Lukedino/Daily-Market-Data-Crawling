@@ -145,13 +145,20 @@ def _get_dart():
 
 
 def _fetch_report(dart, code: str, year: int, reprt_code: str):
-    """finstate CFS 우선 → OFS 폴백. 실패는 호출부에서 처리."""
-    for fs_div in ("CFS", "OFS"):
-        df = dart.finstate(code, year, reprt_code=reprt_code, fs_div=fs_div)
-        time.sleep(_SLEEP_SEC)
-        if df is not None and len(df) > 0:
-            return df
-    return None
+    """finstate 1회 호출 — 응답은 CFS·OFS 행이 함께 오며 fs_div '컬럼'으로 구분된다
+    (OpenDartReader.finstate는 fs_div '인자'를 받지 않는다 — 최종 리뷰에서 실증).
+    CFS(연결) 행 우선, 없으면 OFS(개별) 행. 둘 다 없으면 None."""
+    df = dart.finstate(code, year, reprt_code=reprt_code)
+    time.sleep(_SLEEP_SEC)
+    if df is None or len(df) == 0:
+        return None
+    if "fs_div" in df.columns:
+        for fs in ("CFS", "OFS"):
+            sub = df[df["fs_div"] == fs]
+            if len(sub) > 0:
+                return sub
+        return None
+    return df
 
 
 def collect_kr_financials(top_n: int = 1000, upload: bool = True,
@@ -257,3 +264,12 @@ def collect_kr_financials(top_n: int = 1000, upload: bool = True,
     if failed:
         logger.warning(f"[KrFinancials] 실패 {len(failed)}종목: {failed[:20]}")
     logger.info(f"[KrFinancials] 완료: {len(codes) - len(failed)}/{len(codes)}종목")
+
+    # 실패율 90% 이상 → 파이프라인 자체 결함으로 간주하고 워크플로우를 실패로 종료한다.
+    # int(len(codes)*0.9)로 내림하면 소규모 유니버스(예: 2종목)에서 문턱이 1로 무너져
+    # 50% 실패에도 오탐 — 정수 내림 없이 비율 그대로 비교한다(최종 리뷰 시정).
+    if codes and len(failed) >= len(codes) * 0.9:
+        raise RuntimeError(
+            f"[KrFinancials] 실패율 과다({len(failed)}/{len(codes)}) — "
+            f"수집 파이프라인 자체 결함 가능성. 워크플로우를 실패로 종료한다"
+        )

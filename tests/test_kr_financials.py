@@ -181,19 +181,20 @@ def test_report_codes():
 
 
 class _FakeDart:
-    """finstate 스텁 — (code, year, reprt_code) → 합성 df. 호출 기록."""
+    """finstate 스텁 — (code, year, reprt_code) → 합성 df. 호출 기록.
+    실제 OpenDartReader.finstate는 fs_div 인자를 받지 않는다(최종 리뷰에서 실증) —
+    응답 df 자체에 CFS/OFS 행이 섞여 오고 fs_div '컬럼'으로 구분된다."""
     def __init__(self, tables):
         self.tables = tables      # {(code, year, reprt_code): df|None}
         self.calls = []
 
-    def finstate(self, code, year, reprt_code="11011", fs_div="CFS"):
-        self.calls.append((code, year, reprt_code, fs_div))
-        df = self.tables.get((code, year, reprt_code))
-        return df if fs_div == "CFS" else None   # OFS 폴백 경로는 별도 케이스로
+    def finstate(self, code, year, reprt_code="11011"):
+        self.calls.append((code, year, reprt_code))
+        return self.tables.get((code, year, reprt_code))
 
 
-def _is_row(nm, amount, add=""):
-    return {"sj_div": "IS", "account_nm": nm, "thstrm_amount": amount, "thstrm_add_amount": add}
+def _is_row(nm, amount, add="", fs="CFS"):
+    return {"sj_div": "IS", "fs_div": fs, "account_nm": nm, "thstrm_amount": amount, "thstrm_add_amount": add}
 
 
 class TestCollectKrFinancials:
@@ -259,7 +260,7 @@ class TestCollectKrFinancials:
         })
         class _BoomDart:
             calls = []
-            def finstate(self, code, year, reprt_code="11011", fs_div="CFS"):
+            def finstate(self, code, year, reprt_code="11011"):
                 if code == "005930":
                     raise RuntimeError("DART boom")
                 return _finstate_df([_is_row("당기순이익", "10")])
@@ -268,3 +269,51 @@ class TestCollectKrFinancials:
         from data import financials_db
         saved = financials_db.load_financials_year("kr", 2026)
         assert set(saved["Ticker"]) == {"000660"}   # 실패 종목 스킵, 나머지 계속
+
+    def test_total_failure_raises_runtime_error(self, monkeypatch, tmp_path):
+        # 유니버스 2종목 전부 실패(100% >= 90% 임계) → 파이프라인 자체 결함으로 간주하고 RuntimeError
+        from datetime import date as _d
+        marcap = pd.DataFrame({
+            "Code": ["005930", "000660"], "Marcap": [500, 300], "Stocks": [100, 50],
+            "Date": [_d(2026, 9, 3)] * 2,
+        })
+        class _AllBoomDart:
+            def finstate(self, code, year, reprt_code="11011"):
+                raise RuntimeError("DART boom")
+        kfc = self._setup(monkeypatch, tmp_path, {}, marcap)
+        with pytest.raises(RuntimeError):
+            kfc.collect_kr_financials(top_n=10, upload=False, dart=_AllBoomDart(), years=[2026])
+
+
+class TestFetchReport:
+    """_fetch_report — finstate 응답의 fs_div '컬럼'에서 CFS 우선·OFS 폴백 선택 (fs_div 인자 없음)."""
+
+    def test_mixed_cfs_ofs_prefers_cfs(self, monkeypatch):
+        from data import kr_financials_collector as kfc
+        monkeypatch.setattr(kfc, "_SLEEP_SEC", 0)
+        df = _finstate_df([
+            {"sj_div": "IS", "fs_div": "OFS", "account_nm": "매출액", "thstrm_amount": "111", "thstrm_add_amount": ""},
+            {"sj_div": "IS", "fs_div": "CFS", "account_nm": "매출액", "thstrm_amount": "999", "thstrm_add_amount": ""},
+        ])
+
+        class _D:
+            def finstate(self, code, year, reprt_code="11011"):
+                return df
+
+        out = kfc._fetch_report(_D(), "005930", 2026, "11013")
+        assert set(out["fs_div"]) == {"CFS"}
+        assert kfc.extract_cumulative_accounts(out)["Revenue"] == 999.0
+
+    def test_ofs_only_falls_back(self, monkeypatch):
+        from data import kr_financials_collector as kfc
+        monkeypatch.setattr(kfc, "_SLEEP_SEC", 0)
+        df = _finstate_df([
+            {"sj_div": "IS", "fs_div": "OFS", "account_nm": "매출액", "thstrm_amount": "111", "thstrm_add_amount": ""},
+        ])
+
+        class _D:
+            def finstate(self, code, year, reprt_code="11011"):
+                return df
+
+        out = kfc._fetch_report(_D(), "005930", 2026, "11013")
+        assert extract_cumulative_accounts(out)["Revenue"] == 111.0

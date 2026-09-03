@@ -495,8 +495,8 @@ def run_sector_meta(args):
 
 def run_financials_update(args):
     """
-    US financials + ratios, Crypto ratios 수집 및 Drive 업로드.
-    --market us|crypto|all 옵션 지원.
+    US financials + ratios, Crypto ratios, KR financials(DART) 수집 및 Drive 업로드.
+    --market us|crypto|kr|all 옵션 지원.
     """
     from data import financials_collector
     markets = ["us", "crypto", "kr"] if args.market == "all" else [args.market]
