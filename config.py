@@ -36,6 +36,7 @@ DRIVE_PATHS = {
     "ohlc_kr":       "kr",            # KR 시장 OHLC+시총 (연도별 parquet, 구 marcap 폴더)
     "ohlc_meta":     "_meta",         # DB 상태 메타 (db_status.json)
     "us_financials": "us/financials", # US 분기 재무제표
+    "kr_financials": "kr/financials", # KR 분기 재무제표 (섹터리더 2단계 KR)
     "us_ratios":     "us/ratios",     # US 재무비율 스냅샷
     "crypto_ratios": "crypto/ratios", # Crypto 시장 데이터 스냅샷
 }

@@ -22,7 +22,11 @@ US 주식/ETF, 크립토, KR(한국) 시장 OHLC + 재무데이터를 수집해 
     ├─ kr/          ← KR OHLC + 시총 (marcap 스키마, 연도별 parquet)
     │   ├─ marcap-2025.parquet
     │   ├─ marcap-2026.parquet
-    │   └─ marcap-2027~2030.parquet  (빈 플레이스홀더, 수동 업로드)
+    │   ├─ marcap-2027~2030.parquet  (빈 플레이스홀더, 수동 업로드)
+    │   └─ financials/
+    │       ├─ kr_financials_2025.parquet
+    │       ├─ kr_financials_2026.parquet
+    │       └─ kr_financials_2027.parquet  (빈 플레이스홀더, 수동 업로드)
     ├─ us/          ← US 주식/ETF OHLC (연도별 parquet)
     │   ├─ us_YYYY.parquet
     │   └─ us_sector_meta.parquet   ← 종목 메타 (Sector/Industry/Market, 주 1회 갱신)
@@ -58,7 +62,7 @@ US 주식/ETF, 크립토, KR(한국) 시장 OHLC + 재무데이터를 수집해 
 | `ohlc-daily.yml` | **매일 UTC 00:30 (KST 09:30)** | **Crypto 전용** — 일봉 마감(UTC 00:00) 직후 확정 캔들 수집 |
 | `ohlc-backfill.yml` | workflow_dispatch | US/Crypto OHLC 과거 수집 |
 | `ohlc-new-ticker-backfill.yml` | workflow_dispatch | 유니버스에 새로 추가된 종목만 골라 과거 이력 백필 (daily에도 자동 통합됨) |
-| `financials-update.yml` | 자동 | US 재무데이터 수집 |
+| `financials-update.yml` | 자동 | US/KR 재무데이터 수집 (KR은 DART, 시총 상위 1,000) |
 | `sector-meta.yml` | 매주 일요일 UTC 01:00 (KST 10:00) | US/Crypto Sector/Industry/Market 태그 수집 |
 
 ---
@@ -162,6 +166,7 @@ python scripts/verify_kr.py --drive --fix
 
 | 날짜 | 변경 내용 |
 |------|---------|
+| 2026-09-03 | **[FEAT-KR-FINANCIALS]** KR 분기 재무 파이프라인 (섹터리더 2단계 KR §A) — DART 주요계정(OpenDartReader)·누적 차분 분기화·EPS=순이익÷상장주식수 근사·시총 상위 1,000·증분 스킵. `kr/financials/kr_financials_YYYY.parquet` (placeholder 수동 업로드 필요 — SA 제약). financials-update에 market=kr 추가 |
 | 2026-08-26 | **[BUG-COVERAGE-SHRINK]** 같은 형태의 데이터 소실이 세 번째 발생한 것을 확인하고 **저장 직전 축소 가드**를 넣었다. 이력: crypto 2026 197→172종목(`[BUG-BACKFILL-REPLACE]`, 2026-08-12), crypto 2022 161→33종목(`[BUG-PURGE-TOO-WIDE]`, 2026-08-13), 그리고 이번에 발견된 **us 2024 899→727종목**(2026-08-20 백필, 무징후로 통과해 기록조차 없었음 — 소비 측 ML_Market Data Analysis 의 무결성 스윕에서 뒤늦게 검출). `[BUG-BACKFILL-REPLACE]` 대응으로 `download_year()` 선행 호출을 넣었는데도 재발한 이유는 `save_year()` 에 구멍이 둘 남아서다. **구멍 A**: 로컬 파일이 없으면 병합 블록을 건너뛰고 그냥 쓴다 — `download_year()` 가 "Drive 에 없음"과 "다운로드 실패"를 모두 `False` 로 돌려줘 호출부가 구분할 수 없었다. **구멍 B**: 병합 중 예외가 나면 `logger.warning` 만 남기고 덮어쓴다. 둘 다 조용히 통과한다. → ①`save_year()` 에 `CoverageShrinkError` + `TICKER_SHRINK_TOLERANCE_PCT=5.0` 축소 가드(저장·업로드 전에 예외), ②병합 예외를 경고가 아니라 중단으로 승격, ③`download_year_state()` 신설로 `ok`/`absent`/`failed` 3상태 구분 — `backfill_market()` 이 `failed` 면 해당 연도를 건너뛴다, ④`replace_tickers` 로 의도적으로 비우는 종목은 양쪽에서 똑같이 빼고 세어 정당한 purge(ARB 2022 등)와 사고를 구분. 실제 us_2023(899)/us_2024(727) 파일로 검증 — 가드 작동 후 원본 899종목 보존 확인. 테스트 16개 추가(`tests/test_coverage_shrink_guard.py`) |
 | 2026-08-14 | **[VERIFY-CRYPTO-CLEAN]** `[BUG-PURGE-TOO-WIDE]` 수정 후 재백필한 crypto 2020~2026 데이터 최종 검증. 접합 흔적(하루 300%+ 급변) 62→61→**21/228종목(9%)**으로 개선. 남은 21개를 CMC 현재가와 전수 대조한 결과 전부 자릿수 일치(1.0x) — 오염이 아니라 **실제 시장 이벤트**로 확인됨(AAVE 2020-10-03 LEND→AAVE 100:1 리디노미네이션, OP/WLD/TAO 상장일 초기 가격발견, TIA 본딩커브 등). 유일하게 여전히 오염 상태였던 4종목(COW/GMX/SIGN/TON — 예: `TON-USD`가 실제 Toncoin이 아니라 "TON Token"이라는 별개 잡코인)은 **전부 현재 200종목 유니버스 밖**(과거 한때 Top200이었다가 탈락)이라 오늘 전략·백테스트 대상이 아님을 확인. `resolve_symbol_overrides`가 CMC Top200에 없는 종목은 대조 기준이 없어 검증을 건너뛰기 때문 — 향후 이 종목들이 Top200에 재진입하면 재검증 필요(알려진 한계로 기록, 현재는 무해) |
 | 2026-08-13 | **[BUG-PURGE-TOO-WIDE]** `[BUG-WRONG-TOKEN-2]`의 `replace_tickers`를 **유니버스 전체**로 넘긴 탓에 대량 데이터 소실. 배치 다운로드가 레이트리밋으로 실패한 종목까지 기존 행이 purge되어, crypto 백필 후 **2022년 161종목→33종목 / 전체 365,172행→185,259행**으로 반토막. → `purge_targets(symbol_overrides, failed)` 신설: ①심볼이 잘못됐다고 판명된 종목(override 존재)이면서 ②이번 조회가 하드 실패하지 않은 것만 대상. override 없는 종목은 기존 행 단위 병합이 그대로 적용되어 데이터가 보존된다. 유니버스 밖 종목(강등 코인)은 애초에 purge 대상이 아니라 이번 사고에서도 무사했음(29종목 확인). 소실분은 전체 백필이 Yahoo에서 재수집하므로 재실행으로 복구됨 |

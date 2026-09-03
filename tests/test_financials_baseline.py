@@ -117,3 +117,87 @@ def test_collector_crypto_calls_baseline(monkeypatch):
     monkeypatch.setattr(financials_collector, "_CMC_URL", "http://127.0.0.1:9/none")
     financials_collector.collect_crypto_ratios(tickers=[], upload=True)
     assert calls == [("crypto", ("ratios",))]
+
+
+# ── financials Drive 경로 market 키 일반화 (kr 지원, Task 2) ───────────────
+
+
+class _UploadRecordingUploader:
+    """upload() 호출의 remote 인자를 기록하는 스텁 (StubUploader 는 download_all_state 전용)."""
+
+    def __init__(self):
+        self.uploaded = []
+
+    def upload(self, local, remote):
+        self.uploaded.append(remote)
+
+
+def test_baseline_kr_financials_uses_kr_drive_path(fdb):
+    """market='kr' + kinds=('financials',) → DRIVE_PATHS['kr_financials'] 경로로 다운로드."""
+    u = StubUploader({"kr/financials": "absent"})
+    fdb.ensure_drive_baseline("kr", kinds=("financials",), uploader=u)
+    assert [c[0] for c in u.calls] == ["kr/financials"]
+
+
+def test_upload_financials_kr_drive_path(fdb):
+    """upload_financials('kr', ...)가 kr/financials 원격 경로를 쓴다."""
+    p = fdb.local_financials_path("kr", 2026)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(b"x")
+
+    u = _UploadRecordingUploader()
+    fdb.upload_financials("kr", [2026], uploader=u)
+    assert u.uploaded == ["kr/financials"]
+
+
+# ── 수집 함수 배선 — KR (Task 3, 최종 리뷰 반영) ────────────────────
+
+
+def _kr_baseline_setup(monkeypatch, tmp_path):
+    """collect_kr_financials가 실제 I/O 없이 돌게 하는 공통 스텁 (financials_db._LOCAL_ROOT
+    격리 + kr_db.download_year/load_year 1종목 marcap 스텁 + upload_financials no-op)."""
+    from data import financials_db, kr_db
+
+    monkeypatch.setattr(financials_db, "_LOCAL_ROOT", tmp_path / "ohlc_db")
+    monkeypatch.setattr(financials_db, "upload_financials", lambda *a, **k: None)
+    monkeypatch.setattr(kr_db, "download_year", lambda year, uploader=None: True)
+    from datetime import date as _d
+    marcap = pd.DataFrame({
+        "Code": ["005930"], "Marcap": [500], "Stocks": [100],
+        "Date": [_d(2026, 9, 3)],
+    })
+    monkeypatch.setattr(kr_db, "load_year", lambda year: marcap)
+
+
+class _EmptyDart:
+    """finstate가 항상 응답 없음 — 실네트워크·실계정 없이 배선만 검증."""
+
+    def finstate(self, code, year, reprt_code="11011"):
+        return None
+
+
+def test_collector_kr_calls_baseline_before_save(monkeypatch, tmp_path):
+    from data import kr_financials_collector as kfc, financials_db
+
+    calls = []
+    _kr_baseline_setup(monkeypatch, tmp_path)
+    monkeypatch.setattr(financials_db, "ensure_drive_baseline",
+                        lambda market, kinds=("financials", "ratios"), uploader=None:
+                        calls.append((market, tuple(kinds))))
+    monkeypatch.setattr(kfc, "_SLEEP_SEC", 0)
+
+    kfc.collect_kr_financials(top_n=10, upload=True, dart=_EmptyDart(), years=[2026])
+    assert calls == [("kr", ("financials",))]
+
+
+def test_collector_kr_skips_baseline_without_upload(monkeypatch, tmp_path):
+    from data import kr_financials_collector as kfc, financials_db
+
+    calls = []
+    _kr_baseline_setup(monkeypatch, tmp_path)
+    monkeypatch.setattr(financials_db, "ensure_drive_baseline",
+                        lambda *a, **k: calls.append(a))
+    monkeypatch.setattr(kfc, "_SLEEP_SEC", 0)
+
+    kfc.collect_kr_financials(top_n=10, upload=False, dart=_EmptyDart(), years=[2026])
+    assert calls == []

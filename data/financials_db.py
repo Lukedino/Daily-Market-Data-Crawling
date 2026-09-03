@@ -250,6 +250,10 @@ def _get_uploader(uploader=None):
         return None
 
 
+def _financials_drive_key(market: str) -> str:
+    return f"{market}_financials"
+
+
 def upload_financials(market: str, years: list[int], uploader=None):
     """지정 연도 financials Parquet을 Drive에 업로드."""
     u = _get_uploader(uploader)
@@ -257,9 +261,10 @@ def upload_financials(market: str, years: list[int], uploader=None):
         logger.warning("[FinancialsDB] uploader 없음 → 업로드 건너뜀")
         return
 
-    remote_path = config.DRIVE_PATHS.get("us_financials")
+    drive_key = _financials_drive_key(market)
+    remote_path = config.DRIVE_PATHS.get(drive_key)
     if not remote_path:
-        logger.error("[FinancialsDB] DRIVE_PATHS에 'us_financials' 없음")
+        logger.error(f"[FinancialsDB] DRIVE_PATHS에 '{drive_key}' 없음")
         return
 
     for year in years:
@@ -311,9 +316,10 @@ def download_financials_all(market: str, uploader=None):
     if u is None:
         return
 
-    remote_path = config.DRIVE_PATHS.get("us_financials")
+    drive_key = _financials_drive_key(market)
+    remote_path = config.DRIVE_PATHS.get(drive_key)
     if not remote_path:
-        logger.error("[FinancialsDB] DRIVE_PATHS에 'us_financials' 없음")
+        logger.error(f"[FinancialsDB] DRIVE_PATHS에 '{drive_key}' 없음")
         return
 
     local_d = _LOCAL_ROOT / market / "financials"
@@ -362,7 +368,7 @@ def download_ratios_all(market: str, uploader=None):
 def _baseline_remote_and_local(market: str, kind: str):
     """kind('financials'|'ratios')의 Drive 경로와 로컬 폴더. DRIVE_PATHS 미설정이면 remote=None."""
     if kind == "financials":
-        remote = config.DRIVE_PATHS.get("us_financials")
+        remote = config.DRIVE_PATHS.get(_financials_drive_key(market))
     elif market == "us":
         remote = config.DRIVE_PATHS.get("us_ratios")
     else:
