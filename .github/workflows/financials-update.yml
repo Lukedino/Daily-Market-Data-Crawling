@@ -9,7 +9,7 @@ on:
       market:
         description: '대상 시장'
         type: choice
-        options: [all, us, crypto]
+        options: [all, us, crypto, kr]
         default: all
       dry_run:
         description: '테스트 실행'
@@ -38,6 +38,7 @@ jobs:
           GDRIVE_OHLC_FOLDER_ID:       ${{ secrets.GDRIVE_OHLC_FOLDER_ID }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_APPLICATION_CREDENTIALS }}
           GDRIVE_LUKE_PICKS_FILE_ID:   ${{ secrets.GDRIVE_LUKE_PICKS_FILE_ID }}
+          DART_API_KEY:                ${{ secrets.DART_API_KEY }}
         run: |
           ARGS="--mode financials-update --upload-drive --market ${{ inputs.market || 'all' }}"
           ${{ inputs.dry_run || 'false' }} && ARGS="$ARGS --dry-run"

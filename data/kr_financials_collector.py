@@ -121,3 +121,139 @@ def quarter_period_date(year: int, quarter: int) -> date:
     """12월 결산 가정 — 분기말 달력일."""
     return {1: date(year, 3, 31), 2: date(year, 6, 30),
             3: date(year, 9, 30), 4: date(year, 12, 31)}[quarter]
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 수집 오케스트레이션 (I/O)
+# ══════════════════════════════════════════════════════════════════════════
+import time
+
+_SLEEP_SEC = 0.15   # DART 한도(분당 1,000) 대비 보수적. 크롤링용 DELAY_API와 별개
+
+
+def _get_dart():
+    """OpenDartReader 인스턴스 (data/collector.py:320 동일 3줄 — 레거시 모듈 import 회피용 복제).
+    인스턴스 생성 시 corp_code 매핑을 1회 다운로드한다."""
+    import OpenDartReader
+    import config
+    if not config.DART_API_KEY:
+        raise ValueError("DART_API_KEY가 설정되지 않았습니다.")
+    import inspect
+    if inspect.isclass(OpenDartReader):
+        return OpenDartReader(config.DART_API_KEY)
+    return OpenDartReader.OpenDartReader(config.DART_API_KEY)
+
+
+def _fetch_report(dart, code: str, year: int, reprt_code: str):
+    """finstate CFS 우선 → OFS 폴백. 실패는 호출부에서 처리."""
+    for fs_div in ("CFS", "OFS"):
+        df = dart.finstate(code, year, reprt_code=reprt_code, fs_div=fs_div)
+        time.sleep(_SLEEP_SEC)
+        if df is not None and len(df) > 0:
+            return df
+    return None
+
+
+def collect_kr_financials(top_n: int = 1000, upload: bool = True,
+                          dart=None, years: list | None = None):
+    """KR 시총 상위 top_n 종목의 분기 재무 수집 (스펙 §A).
+
+    1. marcap 최신 스냅샷 → 유니버스 (kr_db.download_year + load_year)
+    2. ensure_drive_baseline('kr', financials만) — failed면 중단
+    3. 종목별: 기존 분기 확인 → 부족 분기의 필요 보고서만 DART 조회 → 누적 차분 → EPS
+    4. 50종목마다 중간 저장·업로드 (US 수집기와 동일 패턴)
+    """
+    from datetime import date as _date
+    from data import financials_db, kr_db
+
+    try:
+        from tqdm import tqdm as _tqdm
+    except ImportError:
+        _tqdm = None
+
+    this_year = _date.today().year
+    years = years or [this_year - 1, this_year]
+
+    # ── 유니버스 ──
+    uni_year = this_year
+    kr_db.download_year(uni_year)
+    marcap = kr_db.load_year(uni_year)
+    universe = build_universe(marcap, top_n)
+    if universe.empty:
+        logger.error("[KrFinancials] marcap 유니버스 비어있음 — 중단")
+        return
+    stocks_map = dict(zip(universe["Code"], universe["Stocks"]))
+
+    # ── Drive 베이스라인 (kr financials만) ──
+    if upload:
+        financials_db.ensure_drive_baseline("kr", kinds=("financials",))
+
+    # ── 기존 저장 분기 (증분 스킵 기준) ──
+    existing: dict[str, set] = {}
+    for y in years:
+        df_y = financials_db.load_financials_year("kr", y)
+        if df_y.empty or "Ticker" not in df_y.columns:
+            continue
+        for _, r in df_y.iterrows():
+            existing.setdefault(str(r["Ticker"]).zfill(6), set()).add((int(r["Year"]), int(r["Quarter"])))
+
+    if dart is None:
+        dart = _get_dart()
+
+    snap = _date.today()
+    rows: list[dict] = []
+    failed: list[str] = []
+    codes = list(universe["Code"])
+    it = _tqdm(codes, desc="KR Financials", unit="종목") if _tqdm else codes
+
+    def _flush():
+        nonlocal rows
+        if not rows:
+            return
+        df = pd.DataFrame(rows)
+        financials_db.save_financials(df, "kr")
+        if upload:
+            ys = sorted({r["Year"] for r in rows})
+            financials_db.upload_financials("kr", ys)
+        rows = []
+
+    for idx, code in enumerate(it, start=1):
+        try:
+            for y in years:
+                # 목표 분기: 과거 연도는 4개 전부, 당해 연도도 4개 시도(미공시 보고서는 응답 없음 → 자연 결측)
+                have = {q for (yy, q) in existing.get(code, set()) if yy == y}
+                need_reports = required_reports(have, {1, 2, 3, 4})
+                if not need_reports:
+                    continue
+                cums = {}
+                for rk in sorted(need_reports):
+                    df_r = _fetch_report(dart, code, y, REPORT_CODES[rk])
+                    cums[rk] = extract_cumulative_accounts(df_r)
+                quarters = derive_quarters(cums)
+                for q, vals in quarters.items():
+                    if q in have:
+                        continue
+                    if all(v is None for v in vals.values()):
+                        continue   # 아무 값도 없는 분기는 저장하지 않음 (미공시)
+                    rows.append({
+                        "Ticker": code,
+                        "PeriodDate": quarter_period_date(y, q),
+                        "Year": y, "Quarter": q,
+                        "Revenue": vals["Revenue"],
+                        "OperatingIncome": vals["OperatingIncome"],
+                        "NetIncome": vals["NetIncome"],
+                        "DilutedEPS": compute_eps(vals["NetIncome"], stocks_map.get(code)),
+                        "SnapDate": snap,
+                    })
+        except Exception as e:
+            logger.warning(f"[KrFinancials] {code} 실패 — 스킵: {type(e).__name__}: {e}")
+            failed.append(code)
+
+        if idx % 50 == 0:
+            _flush()
+            logger.info(f"[KrFinancials] 진행 {idx}/{len(codes)}")
+
+    _flush()
+    if failed:
+        logger.warning(f"[KrFinancials] 실패 {len(failed)}종목: {failed[:20]}")
+    logger.info(f"[KrFinancials] 완료: {len(codes) - len(failed)}/{len(codes)}종목")

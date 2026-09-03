@@ -499,7 +499,7 @@ def run_financials_update(args):
     --market us|crypto|all 옵션 지원.
     """
     from data import financials_collector
-    markets = ["us", "crypto"] if args.market == "all" else [args.market]
+    markets = ["us", "crypto", "kr"] if args.market == "all" else [args.market]
     for market in markets:
         if market == "us":
             logger.info("[FinancialsUpdate] US 재무 데이터 수집 시작")
@@ -513,6 +513,13 @@ def run_financials_update(args):
                 financials_collector.collect_crypto_ratios(upload=args.upload_drive)
             else:
                 logger.info("[DryRun] crypto financials update 시뮬레이션")
+        elif market == "kr":
+            logger.info("[FinancialsUpdate] KR 재무 데이터 수집 시작")
+            if not args.dry_run:
+                from data import kr_financials_collector
+                kr_financials_collector.collect_kr_financials(upload=args.upload_drive)
+            else:
+                logger.info("[DryRun] KR financials update 시뮬레이션")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -603,7 +610,7 @@ def main():
 
     # ohlc 모드 전용
     parser.add_argument(
-        "--market", choices=["us", "crypto", "all"], default="all",
+        "--market", choices=["us", "crypto", "kr", "all"], default="all",
         help="ohlc 모드: 대상 시장 (기본: all)",
     )
     parser.add_argument(

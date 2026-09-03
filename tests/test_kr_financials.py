@@ -178,3 +178,93 @@ def test_quarter_period_date():
 
 def test_report_codes():
     assert REPORT_CODES == {1: "11013", 2: "11012", 3: "11014", 4: "11011"}
+
+
+class _FakeDart:
+    """finstate 스텁 — (code, year, reprt_code) → 합성 df. 호출 기록."""
+    def __init__(self, tables):
+        self.tables = tables      # {(code, year, reprt_code): df|None}
+        self.calls = []
+
+    def finstate(self, code, year, reprt_code="11011", fs_div="CFS"):
+        self.calls.append((code, year, reprt_code, fs_div))
+        df = self.tables.get((code, year, reprt_code))
+        return df if fs_div == "CFS" else None   # OFS 폴백 경로는 별도 케이스로
+
+
+def _is_row(nm, amount, add=""):
+    return {"sj_div": "IS", "account_nm": nm, "thstrm_amount": amount, "thstrm_add_amount": add}
+
+
+class TestCollectKrFinancials:
+    def _setup(self, monkeypatch, tmp_path, tables, marcap):
+        from data import kr_financials_collector as kfc, financials_db, kr_db
+        monkeypatch.setattr(financials_db, "_LOCAL_ROOT", tmp_path)
+        monkeypatch.setattr(kr_db, "download_year", lambda year, uploader=None: True)
+        monkeypatch.setattr(kr_db, "load_year", lambda year: marcap)
+        monkeypatch.setattr(kfc, "_SLEEP_SEC", 0)   # 테스트 무지연
+        return kfc
+
+    def _marcap(self):
+        from datetime import date
+        return pd.DataFrame({
+            "Code": ["005930"], "Marcap": [500], "Stocks": [100],
+            "Date": [date(2026, 9, 3)],
+        })
+
+    def test_collects_and_saves_quarters(self, monkeypatch, tmp_path):
+        # 2026년 1Q·반기 보고서만 존재 → Q1·Q2 저장, EPS = NetIncome/Stocks
+        tables = {
+            ("005930", 2026, "11013"): _finstate_df([_is_row("매출액", "100"), _is_row("당기순이익", "50")]),
+            ("005930", 2026, "11012"): _finstate_df([_is_row("매출액", "250"), _is_row("당기순이익", "120")]),
+        }
+        kfc = self._setup(monkeypatch, tmp_path, tables, self._marcap())
+        fake = _FakeDart(tables)
+        kfc.collect_kr_financials(top_n=10, upload=False, dart=fake, years=[2026])
+
+        from data import financials_db
+        saved = financials_db.load_financials_year("kr", 2026)
+        assert len(saved) == 2
+        by_q = saved.set_index("Quarter")
+        assert by_q.loc[1, "NetIncome"] == 50
+        assert by_q.loc[2, "NetIncome"] == 70          # 120-50
+        assert by_q.loc[2, "DilutedEPS"] == pytest.approx(0.7)  # 70/100
+        assert str(by_q.loc[1, "Ticker"]) == "005930"
+
+    def test_incremental_skips_existing_quarters(self, monkeypatch, tmp_path):
+        # Q1이 이미 저장돼 있으면 1Q 보고서는 재조회하지 않는다 (반기 차분에 필요한 1은 예외적으로 조회)
+        tables = {
+            ("005930", 2026, "11013"): _finstate_df([_is_row("당기순이익", "50")]),
+            ("005930", 2026, "11012"): _finstate_df([_is_row("당기순이익", "120")]),
+        }
+        kfc = self._setup(monkeypatch, tmp_path, tables, self._marcap())
+        from data import financials_db
+        financials_db.save_financials(pd.DataFrame([{
+            "Ticker": "005930", "PeriodDate": date(2026, 3, 31), "Year": 2026,
+            "Quarter": 1, "NetIncome": 50.0, "SnapDate": date(2026, 9, 1),
+        }]), "kr")
+
+        fake = _FakeDart(tables)
+        kfc.collect_kr_financials(top_n=10, upload=False, dart=fake, years=[2026])
+        # Q2 산출에 1Q 누적이 필요하므로 11013·11012 조회는 허용되나, Q1 행은 dedup으로 1개 유지
+        saved = financials_db.load_financials_year("kr", 2026)
+        assert len(saved) == 2
+        assert set(saved["Quarter"]) == {1, 2}
+
+    def test_ticker_failure_skips_and_continues(self, monkeypatch, tmp_path):
+        from datetime import date as _d
+        marcap = pd.DataFrame({
+            "Code": ["005930", "000660"], "Marcap": [500, 300], "Stocks": [100, 50],
+            "Date": [_d(2026, 9, 3)] * 2,
+        })
+        class _BoomDart:
+            calls = []
+            def finstate(self, code, year, reprt_code="11011", fs_div="CFS"):
+                if code == "005930":
+                    raise RuntimeError("DART boom")
+                return _finstate_df([_is_row("당기순이익", "10")])
+        kfc = self._setup(monkeypatch, tmp_path, {}, marcap)
+        kfc.collect_kr_financials(top_n=10, upload=False, dart=_BoomDart(), years=[2026])
+        from data import financials_db
+        saved = financials_db.load_financials_year("kr", 2026)
+        assert set(saved["Ticker"]) == {"000660"}   # 실패 종목 스킵, 나머지 계속
