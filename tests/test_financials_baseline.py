@@ -117,3 +117,34 @@ def test_collector_crypto_calls_baseline(monkeypatch):
     monkeypatch.setattr(financials_collector, "_CMC_URL", "http://127.0.0.1:9/none")
     financials_collector.collect_crypto_ratios(tickers=[], upload=True)
     assert calls == [("crypto", ("ratios",))]
+
+
+# ── financials Drive 경로 market 키 일반화 (kr 지원, Task 2) ───────────────
+
+
+class _UploadRecordingUploader:
+    """upload() 호출의 remote 인자를 기록하는 스텁 (StubUploader 는 download_all_state 전용)."""
+
+    def __init__(self):
+        self.uploaded = []
+
+    def upload(self, local, remote):
+        self.uploaded.append(remote)
+
+
+def test_baseline_kr_financials_uses_kr_drive_path(fdb):
+    """market='kr' + kinds=('financials',) → DRIVE_PATHS['kr_financials'] 경로로 다운로드."""
+    u = StubUploader({"kr/financials": "absent"})
+    fdb.ensure_drive_baseline("kr", kinds=("financials",), uploader=u)
+    assert [c[0] for c in u.calls] == ["kr/financials"]
+
+
+def test_upload_financials_kr_drive_path(fdb):
+    """upload_financials('kr', ...)가 kr/financials 원격 경로를 쓴다."""
+    p = fdb.local_financials_path("kr", 2026)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(b"x")
+
+    u = _UploadRecordingUploader()
+    fdb.upload_financials("kr", [2026], uploader=u)
+    assert u.uploaded == ["kr/financials"]
