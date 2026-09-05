@@ -1041,7 +1041,10 @@ def backfill_new_tickers(
             else:
                 df = _enrich_us_marketcap(df)
 
-        ohlc_db.save_year(df, market, year)
+        # 부분집합 병합 — 신규 종목은 유니버스 파일에 없는 날짜(후행일·구멍)에도
+        # 행을 가지므로, 그 날짜를 연속성 게이트에서 빼지 않으면 신규 종목이
+        # 나타나는 날마다 daily 가 여기서 죽는다(2026-08-31~09-04 실패 6회).
+        ohlc_db.save_year(df, market, year, subset_merge=True)
 
         if "Date" in df.columns:
             all_dates.extend(df["Date"].tolist())
@@ -1102,6 +1105,25 @@ def backfill_new_tickers(
 # 증분 업데이트
 # ══════════════════════════════════════════════════════════════════════════════
 
+CRYPTO_LOOKBACK_DAYS = 7
+"""크립토 증분 조회가 매번 다시 받는 일수. 두 가지를 동시에 해결한다.
+① [BUG-PARTIAL-CANDLE] 크립토 일봉 마감은 UTC 00:00인데 ohlc-daily 는 UTC 22:00에
+   돌아 오늘 캔들이 미완성이다 — 직전일을 다시 받아 확정값으로 덮어써야 한다.
+② 야후가 일봉을 늦게 내는 날이 있다 — 2026-08-31 봉은 09-01 05:26Z 조회에도 없었고
+   (199종목에 종목당 2일=394행만 수신), 커서가 하루만 물려 있던 탓에 그 뒤로 다시
+   조회되지 않아 Drive 파일에 영구 구멍이 됐다. 1주를 매번 다시 받으면 200종목×7일
+   =1,400행 수준의 비용으로 이런 결손이 다음 실행에서 자연 치유된다.
+save_year()가 (Ticker, Date) 중복을 keep="last"로 정리하므로 최신 조회분이 이긴다.
+US 는 장마감(UTC 20~21시)이 크롤보다 앞서 캔들이 확정이라 다음날부터 조회한다."""
+
+
+def incremental_start_date(market: str, last_date: date) -> date:
+    """증분 조회 시작일 — 크립토는 최근 CRYPTO_LOOKBACK_DAYS 일을 다시 받는다."""
+    if market == "crypto":
+        return last_date - timedelta(days=CRYPTO_LOOKBACK_DAYS - 1)
+    return last_date + timedelta(days=1)
+
+
 def update_market(
     market: str,
     tickers: Optional[list[str]] = None,
@@ -1143,20 +1165,7 @@ def update_market(
         logger.info(f"[OhlcCollector] {market} status 없음 → 기준일: {last_date}")
 
     # 3. 수집 범위
-    if market == "crypto":
-        # ⚠️ [BUG-PARTIAL-CANDLE] 크립토는 24/7이라 "일봉 마감"이 UTC 00:00인데,
-        # ohlc-daily.yml은 UTC 22:00에 돈다 — 즉 수집 시점에 오늘 캔들은 아직
-        # 2시간 남은 미완성 상태다(Close가 종가가 아닌 22:00 시점 가격, High/Low
-        # 마지막 2시간 누락, Volume ~92%). 그런데 last_updated를 그 날짜로 올려
-        # 버리면 다음 실행은 그 다음날부터 조회하므로 미완성 캔들이 영구히
-        # 확정값으로 남는다.
-        # → 커서를 하루 물려 직전 수집일을 다시 받아 덮어쓴다. save_year()가
-        #   (Ticker, Date) 중복을 keep="last"로 정리하므로 최신 조회분이 이긴다.
-        # US는 장마감(UTC 20~21시)이 크롤 시각보다 앞서 캔들이 이미 확정이라
-        # 해당 없음 — 불필요한 재조회를 피하려고 크립토에만 적용한다.
-        start_date = last_date
-    else:
-        start_date = last_date + timedelta(days=1)
+    start_date = incremental_start_date(market, last_date)
     end_date   = date.today() + timedelta(days=1)  # yfinance end는 exclusive이므로 +1
 
     # 4. 이미 최신이면 종료

@@ -263,6 +263,7 @@ def save_year(df: pd.DataFrame, market: str, year: int,
               *,
               allow_shrink: bool = False,
               allow_gap: bool = False,
+              subset_merge: bool = False,
               _existing_override: Optional[pd.DataFrame] = None):
     """
     연도별 Parquet 저장.
@@ -270,6 +271,11 @@ def save_year(df: pd.DataFrame, market: str, year: int,
     snappy 압축으로 저장.
 
     Args:
+        subset_merge: 이번 df 가 유니버스의 부분집합(신규 종목 백필 등)임을
+            뜻한다. 부분집합은 기존 파일에 없던 날짜(마지막 저장일 이후·기존
+            구멍)에 유니버스 커버리지를 만들 수 없으므로, 연속성 게이트는
+            **기존 파일에 있던 날짜만** 본다. 기존 날짜 사이의 급감은 그대로
+            차단한다(allow_gap 과 다르다). 2026-09-03 daily 3연속 실패 참조.
         replace_tickers: 지정하면 이 종목들의 **기존 행을 전부 버리고** 이번 df로
             대체한다. 행 단위 병합만으로는 지울 수 없는 오염을 걷어내기 위한 것이다.
 
@@ -312,11 +318,14 @@ def save_year(df: pd.DataFrame, market: str, year: int,
     prior_n = _ticker_count_on_disk(market, year, exclude=_exempt)
 
     # 기존 파일 병합
+    existing_dates: set = set()   # subset_merge 게이트 범위 — 기존 파일이 커버하던 날짜
     if path.exists():
         try:
             existing = (load_year(market, year) if _existing_override is None
                         else _existing_override)
             if not existing.empty:
+                if subset_merge and "Date" in existing.columns:
+                    existing_dates = set(pd.to_datetime(existing["Date"]).dt.date)
                 if replace_tickers:
                     purge = {str(t).strip().upper() for t in replace_tickers}
                     before = len(existing)
@@ -375,7 +384,13 @@ def save_year(df: pd.DataFrame, market: str, year: int,
     # 걸린다 — 재수집 결과가 727종목이면 "원래 727이었다"와 구분되지 않기
     # 때문이다. 생산자에서 막아야 Drive 원본이 오염되지 않는다.
     if not allow_gap:
-        cov = check_coverage_continuity(df)
+        cov_df = df
+        if subset_merge and existing_dates and "Date" in df.columns:
+            # 부분집합 병합은 기존 파일에 없던 날짜(후행일·구멍)에 유니버스
+            # 커버리지를 만들 수 없다 — 그 날짜는 검사에서 빼고, 기존 날짜 사이의
+            # 급감만 본다. 구멍 자체는 update_market() 의 재조회가 채운다.
+            cov_df = df[pd.to_datetime(df["Date"]).dt.date.isin(existing_dates)]
+        cov = check_coverage_continuity(cov_df)
         if not cov["ok"]:
             raise CoverageGapError(
                 f"{market}_{year} 저장 중단 — 파일 안에서 유니버스가 하루 만에 "

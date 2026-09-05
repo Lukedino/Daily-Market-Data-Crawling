@@ -289,3 +289,62 @@ class TestCoverageContinuityGate:
                         self._panel(d2, ["A"])], ignore_index=True)
         db.save_year(df, "us", 2024)
         assert db.load_year("us", 2024)["Ticker"].nunique() == 3
+
+
+class TestSubsetMergeGate:
+    """
+    2026-09-03~04 ohlc-daily 3연속 실패(crypto). backfill_new_tickers()는 신규 종목
+    몇 개(부분집합)만 받아 연도 파일에 병합하는데, 신규 종목은 유니버스 파일의
+    마지막 저장일 이후(후행일)와 파일에 없던 날짜(기존 구멍 — 2026-08-31)에도
+    행을 가진다. 병합 결과를 그대로 연속성 게이트에 넣으면 그 날짜들이
+    "203 -> 3종목 = -98.5%"로 잡혀, 유니버스를 채울 update_market() 이 돌기도
+    전에 실행이 죽는다 — 신규 종목이 나타나는 날마다 반드시 재발한다(첫 발생
+    2026-08-31 05:53Z).
+
+    부분집합 병합은 기존 파일에 없던 날짜에 유니버스 커버리지를 만들 수 없으므로
+    그 날짜는 검사에서 뺀다. 기존에 있던 날짜의 급감은 그대로 차단한다.
+    """
+
+    def _panel(self, dates, tickers):
+        return pd.concat([_rows(t, dates) for t in tickers], ignore_index=True)
+
+    UNIVERSE = [f"U{i:04d}" for i in range(200)]
+    NEW = ["N1-USD", "N2-USD", "N3-USD"]
+    # 유니버스 파일: 01-03 이 비어 있고(구멍) 01-05 가 마지막 저장일
+    EXISTING_DATES = ["2024-01-01", "2024-01-02", "2024-01-04", "2024-01-05"]
+    # 신규 종목: 구멍(01-03)과 후행일(01-06)에도 행이 있다
+    NEW_DATES = ["2024-01-01", "2024-01-02", "2024-01-03",
+                 "2024-01-04", "2024-01-05", "2024-01-06"]
+
+    def test_subset_merge_ignores_dates_absent_from_existing(self, db):
+        db.save_year(self._panel(self.EXISTING_DATES, self.UNIVERSE), "crypto", 2024)
+        db.save_year(self._panel(self.NEW_DATES, self.NEW), "crypto", 2024,
+                     subset_merge=True)
+        out = db.load_year("crypto", 2024)
+        per_day = out.groupby(out["Date"].astype(str))["Ticker"].nunique()
+        assert out["Ticker"].nunique() == 203
+        assert per_day["2024-01-03"] == 3       # 구멍은 그대로 드러나 있다(숨기지 않음)
+        assert per_day["2024-01-06"] == 3
+
+    def test_without_flag_reproduces_the_stall(self, db):
+        db.save_year(self._panel(self.EXISTING_DATES, self.UNIVERSE), "crypto", 2024)
+        with pytest.raises(db.CoverageGapError) as e:
+            db.save_year(self._panel(self.NEW_DATES, self.NEW), "crypto", 2024)
+        assert "2024-01-03" in str(e.value) or "2024-01-06" in str(e.value)
+
+    def test_flag_still_blocks_drop_on_existing_dates(self, db):
+        """플래그는 게이트를 끄는 것이 아니다 — 기존 날짜 사이의 급감은 여전히 잡는다."""
+        d_full = ["2024-01-01"]
+        d_thin = ["2024-01-02"]
+        existing = pd.concat([self._panel(d_full, self.UNIVERSE),
+                              self._panel(d_thin, self.UNIVERSE[:50])], ignore_index=True)
+        db.save_year(existing, "crypto", 2024, allow_gap=True)   # 이미 구멍 난 파일을 만든다
+        with pytest.raises(db.CoverageGapError) as e:
+            db.save_year(self._panel(d_full + d_thin, self.NEW), "crypto", 2024,
+                         subset_merge=True)
+        assert "2024-01-02" in str(e.value)
+
+    def test_flag_on_fresh_file_is_harmless(self, db):
+        db.save_year(self._panel(self.NEW_DATES, self.NEW), "crypto", 2024,
+                     subset_merge=True)
+        assert db.load_year("crypto", 2024)["Ticker"].nunique() == 3
