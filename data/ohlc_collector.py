@@ -94,10 +94,23 @@ _SESSION.headers.update({
 # 유니버스 동적 크롤링 — US
 # ══════════════════════════════════════════════════════════════════════════════
 
+# 끝의 거래소 접미사 — 2~3자(.TO .HK .AS .PA .DE .SW .TWO …) + 1자 거래소 코드
+# (.L 런던 / .V TSX-V / .F 프랑크푸르트 / .T 도쿄). 그 외 1자는 클래스 구분자(BRK.B)다.
+_EXCHANGE_SUFFIX_RE = re.compile(r"\.(?:[A-Z]{2,3}|[LVFT])$")
+
+
 def _normalize_ticker(raw: str) -> str:
-    """티커 정규화: 공백 제거, 대문자, '.' → '-', 특수문자 제거."""
-    t = str(raw).strip().upper().replace("$", "").replace(".", "-")
-    return re.sub(r"[^A-Z0-9\-]", "", t)
+    """티커 정규화: 공백 제거, 대문자, 특수문자 제거, '.' → '-'.
+    단 끝의 거래소 접미사는 보존한다 — 모든 '.'을 '-'로 바꾸면 `U-UN.TO`(TSX)가
+    `U-UN-TO`로 야후에 나가 매일 404 → 행이 없어 매일 신규 종목으로 재백필됐다
+    (2026-09-05, Mr.Stock-Market-Crawler [BUG-TICKER] 2026-05-06과 같은 결함).
+    클래스 구분자(`BRK.B`→`BRK-B`)는 야후가 하이픈만 받으므로 기존대로 변환한다."""
+    t = str(raw).strip().upper().replace("$", "")
+    m = _EXCHANGE_SUFFIX_RE.search(t)
+    suffix = m.group(0) if m else ""
+    base = t[:m.start()] if m else t
+    base = re.sub(r"[^A-Z0-9\-]", "", base.replace(".", "-"))
+    return base + suffix
 
 
 def _fetch_sp500() -> list[str]:
