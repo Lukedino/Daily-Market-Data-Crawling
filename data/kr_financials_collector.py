@@ -91,6 +91,10 @@ def build_universe(marcap_df: pd.DataFrame, top_n: int = 1000) -> pd.DataFrame:
         return pd.DataFrame(columns=["Code", "Stocks"])
     latest = marcap_df[marcap_df["Date"] == marcap_df["Date"].max()].copy()
     latest["Code"] = latest["Code"].astype(str).str.strip().str.zfill(6)
+    # 보통주만 — KRX 종목코드 끝자리 0 = 보통주, 5/7/9 = 우선주, 영문 포함 = 특수코드.
+    # 우선주·특수코드는 발행사 corp_code 가 없어 DART 조회가 매 실행 실패만 남긴다
+    # (첫 수집 34종목 전부 이 부류, 2026-09-03). 시총 상위 N 도 보통주 기준으로 센다.
+    latest = latest[latest["Code"].str.fullmatch(r"\d{5}0")]
     latest["Marcap"] = pd.to_numeric(latest["Marcap"], errors="coerce")
     latest = latest.dropna(subset=["Marcap"]).sort_values("Marcap", ascending=False)
     return latest.head(top_n)[["Code", "Stocks"]].reset_index(drop=True)

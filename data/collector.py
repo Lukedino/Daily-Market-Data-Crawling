@@ -342,12 +342,19 @@ def get_dart_financials(ticker: str, year: int) -> dict:
     try:
         result = {"year": year, "ticker": ticker}
 
-        for fs_div in ["CFS", "OFS"]:
-            df = dart.finstate(ticker, year, reprt_code="11011", fs_div=fs_div)
-            if df is not None and not df.empty:
-                result["fs_type"] = fs_div
-                break
-        else:
+        # OpenDartReader 0.2.2 의 finstate()는 fs_div 인자를 받지 않는다 — 응답에 CFS/OFS 행이
+        # 함께 오고 fs_div 컬럼으로 구분된다. 옛 코드는 fs_div=... 를 넘겨 TypeError 로
+        # 전 종목이 조용히 빠졌다(kr_financials_collector 와 같은 선택 규칙으로 정리, 2026-09-05).
+        df_all = dart.finstate(ticker, year, reprt_code="11011")
+        df = None
+        if df_all is not None and not df_all.empty and "fs_div" in df_all.columns:
+            for fs_div in ["CFS", "OFS"]:
+                sub = df_all[df_all["fs_div"] == fs_div]
+                if not sub.empty:
+                    df = sub.copy()
+                    result["fs_type"] = fs_div
+                    break
+        if df is None:
             logger.debug(f"[DART] {ticker} {year} 재무제표 없음")
             return {}
 

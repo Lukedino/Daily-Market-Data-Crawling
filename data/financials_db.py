@@ -145,14 +145,19 @@ def _save_financials_year(df: pd.DataFrame, market: str, year: int):
     path = local_financials_path(market, year)
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    # 기존 파일 병합
+    # 기존 파일 병합 — 실패하면 덮어쓰지 않고 중단한다. 병합 실패 = 기존 데이터를 보존할 수
+    # 없다는 뜻이라 경고만 남기고 덮어쓰면 그 연도 파일이 이번 배치(≤50종목)로 줄어든다
+    # (ohlc_db.save_year 의 "구멍 B" 와 같은 함정, 2026-09-05).
     if path.exists():
         try:
             existing = load_financials_year(market, year)
             if not existing.empty:
                 df = pd.concat([existing, df], ignore_index=True)
         except Exception as e:
-            logger.warning(f"[FinancialsDB] 기존 파일 병합 실패 → 덮어씀: {e}")
+            raise RuntimeError(
+                f"[FinancialsDB] {market}_financials_{year} 기존 파일 병합 실패 — "
+                f"덮어쓰지 않고 중단한다. 원인: {e}"
+            ) from e
 
     # 중복 제거 (최신 우선)
     if "Ticker" in df.columns and "PeriodDate" in df.columns:

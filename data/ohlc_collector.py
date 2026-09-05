@@ -281,17 +281,30 @@ def _fetch_cmc_top200() -> list[str]:
         if not crypto_list:
             crypto_list = data.get("data", [])
 
-        tickers = []
-        for item in crypto_list[:_CMC_TOP_N]:
-            symbol = item.get("symbol", "").upper().strip()
-            if symbol:
-                tickers.append(f"{symbol}-USD")
-
+        tickers = _cmc_items_to_tickers(crypto_list)
         logger.info(f"[Universe] CoinMarketCap Top {len(tickers)}종목")
         return tickers
     except Exception as e:
         logger.warning(f"[Universe] CoinMarketCap 크롤링 실패: {e}")
         return []
+
+
+def _cmc_items_to_tickers(items, top_n: int = _CMC_TOP_N) -> list[str]:
+    """CMC 목록 → yfinance 티커(`{SYMBOL}-USD`). 비ASCII 심볼(예: '币安人生')은 야후에
+    존재할 수 없어 제외한다 — 남겨두면 매 실행 신규 종목으로 백필을 시도해 404/레이트리밋
+    노이즈만 남긴다(2026-09-05)."""
+    tickers, skipped = [], []
+    for item in (items or [])[:top_n]:
+        symbol = str(item.get("symbol", "") or "").upper().strip()
+        if not symbol:
+            continue
+        if not symbol.isascii():
+            skipped.append(symbol)
+            continue
+        tickers.append(f"{symbol}-USD")
+    if skipped:
+        logger.info(f"[Universe] 비ASCII 심볼 {len(skipped)}개 제외(야후 조회 불가): {skipped}")
+    return tickers
 
 
 def _build_crypto_universe() -> list[str]:
