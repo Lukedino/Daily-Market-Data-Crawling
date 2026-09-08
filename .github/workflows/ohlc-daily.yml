@@ -70,3 +70,31 @@ jobs:
       - name: Cleanup credentials
         if: always()
         run: rm -f gdrive_creds.json
+
+      # 2026-09-06·09-08 US 증분이 연속성 게이트에 걸려 죽었는데 알림이 없어
+      # 며칠 뒤에야 알았다(그 사이 소비 측은 하루 늦은 데이터로 돌았다).
+      # ⚠️ 대상 시장은 위 스텝의 출력이 아니라 github.event.schedule로 다시 판별한다.
+      #    checkout·pip install에서 죽으면 그 스텝이 아예 안 돌아 출력이 비고,
+      #    그러면 전부 같은 시장으로 오인된다.
+      - name: Notify failure
+        if: failure()
+        env:
+          TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SCHEDULE:         ${{ github.event.schedule }}
+          INPUT_MARKET:     ${{ inputs.market || 'all' }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$TELEGRAM_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
+            echo "텔레그램 시크릿 미설정 - 실패 알림 생략"
+            exit 0
+          fi
+          if [ "$SCHEDULE" = "30 0 * * *" ]; then
+            MARKET="crypto (일봉 확정 사이클)"
+          elif [ -n "$SCHEDULE" ]; then
+            MARKET="$INPUT_MARKET (미국 장마감 사이클)"
+          else
+            MARKET="$INPUT_MARKET (수동 실행)"
+          fi
+          MSG="🚨 OHLC Daily 수집 실패 — 대상: ${MARKET}. US/크립토 시세가 갱신되지 않았습니다. 하류 영향: ML 분석·Trading-AI-Pipeline·ATR 모니터가 하루 늦은 데이터로 돕니다. 로그: ${RUN_URL}"
+          curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" --data-urlencode "text=${MSG}" > /dev/null
