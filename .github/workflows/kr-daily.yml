@@ -42,3 +42,22 @@ jobs:
           name: kr-daily-log-${{ github.run_id }}
           path: collection.log
           retention-days: 7
+
+      # 이 저장소는 데이터 '생산자'라서 실패가 조용하면 하류(KIS EOD 분석·Mr.Market)가
+      # 하루 늦은 데이터로 돌거나 아예 멈춘다. 2026-09-08에는 수집 0건인데도
+      # run_kr_daily가 조용히 return해서 GHA가 success로 끝났고, 데이터 구멍이 하류
+      # 저장소의 알림으로만 드러났다. 이제 수집 0건이면 exit 1이고 여기서 알린다.
+      # pip install 등 파이썬이 뜨기 전 단계에서 죽어도 보내야 하므로 curl로 직접 쏜다.
+      - name: Notify failure
+        if: failure()
+        env:
+          TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$TELEGRAM_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
+            echo "텔레그램 시크릿 미설정 - 실패 알림 생략"
+            exit 0
+          fi
+          MSG="🚨 KR Daily 수집 실패 — 오늘 한국 시세가 갱신되지 않았습니다. FDR StockListing과 yfinance 폴백이 모두 0건이거나 실행 자체가 죽었습니다. 하류 영향: KIS EOD 분석이 오늘 신호를 만들지 못합니다(직전 신호 유지). 로그: ${RUN_URL}"
+          curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" --data-urlencode "text=${MSG}" > /dev/null

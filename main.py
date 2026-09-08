@@ -300,13 +300,54 @@ def run_ohlc_new_backfill(args):
 # kr-daily 모드
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _recent_code_meta(prior, today, days: int = 7) -> dict:
+    """
+    직전 parquet에서 최근 `days`일 안에 등장한 종목의 {코드: {Name, Market}}.
+
+    FDR StockListing이 죽어도(2026-09-08 상류 캐시 404) 이 정보만 있으면
+    yfinance로 당일 시세를 받아올 수 있다 — 종목 목록·이름·시장 구분은 이미
+    받아둔 parquet에 전부 들어있기 때문이다. 갭 backfill과 당일 폴백이 함께 쓴다.
+
+    Args:
+        prior: 해당 연도 marcap DataFrame (비어 있으면 빈 dict)
+        today: 기준일 (이 날로부터 days일 이내에 거래된 종목만)
+        days:  최근성 판단 창. 이보다 오래 안 보인 종목은 상장폐지로 본다.
+
+    Returns:
+        {"005930": {"Name": "삼성전자", "Market": "KOSPI"}, ...}
+    """
+    import pandas as pd
+
+    if prior is None or prior.empty:
+        return {}
+
+    recent = prior[prior["Date"] >= pd.Timestamp(today) - pd.Timedelta(days=days)]
+    if recent.empty:
+        return {}
+
+    recent = recent.assign(_Code=recent["Code"].astype(str).str.zfill(6))
+    latest = recent.sort_values("Date").drop_duplicates(subset=["_Code"], keep="last")
+    lookup = latest.set_index("_Code")[["Name", "Market"]].to_dict("index")
+    return {
+        code: {
+            "Name": (meta or {}).get("Name", "") or "",
+            "Market": (meta or {}).get("Market", "") or "KOSPI",
+        }
+        for code, meta in lookup.items()
+    }
+
+
 def run_kr_daily(args):
     """
     KR daily 수집 플로우:
     1. Drive에서 현재 연도 parquet + status 다운로드
     2. last_date 확인 → 어제까지 갭이 있으면 yfinance backfill 자동 수행
-    3. 오늘 FDR StockListing 스냅샷 수집
+    3. 오늘 FDR StockListing 스냅샷 수집 (실패 시 yfinance 전량 폴백)
     4. 저장 + Drive 업로드
+
+    ⚠️ 3번이 끝내 0건이면 sys.exit(1)로 끝낸다. 2026-09-08에는 조용히 return해서
+       GHA가 success로 끝났고, 그래서 데이터 구멍이 하류(KIS EOD 분석)의 알림으로만
+       드러났다. 워크플로우에 실패 알림을 붙여도 실패로 끝나지 않으면 뜨지 않는다.
     """
     from datetime import date, timedelta
     from data import kr_collector, kr_db
@@ -323,6 +364,13 @@ def run_kr_daily(args):
     if not kr_db.local_path(current_year).exists():
         logger.info(f"[KrDaily] marcap-{current_year}.parquet 로컬 없음 → Drive 다운로드 시도")
         kr_db.download_year(current_year)
+
+    # 1b. 폴백용 종목 목록 — FDR이 죽어도 쓸 수 있도록 미리 뽑아둔다.
+    #     갭 backfill(_build_universe)과 당일 폴백이 둘 다 FDR에 의존하고 있어서
+    #     2026-09-08에는 폴백 경로 자체가 같은 404로 막혀 있었다.
+    fallback_meta = _recent_code_meta(kr_db.load_year(current_year), today)
+    if fallback_meta:
+        logger.info(f"[KrDaily] 폴백 유니버스 확보: {len(fallback_meta)}종목 (기존 parquet)")
 
     # 2. 갭 감지 → 자동 backfill
     last_date = kr_db.get_last_date(current_year)
@@ -342,7 +390,8 @@ def run_kr_daily(args):
                 f"[KrDaily] 갭 감지: {gap_start} ~ {yesterday} "
                 f"({len(bdays)} 영업일) → yfinance backfill 시작"
             )
-            gap_df = kr_collector.collect_backfill(str(gap_start), str(yesterday))
+            gap_df = kr_collector.collect_backfill(str(gap_start), str(yesterday),
+                                                   fallback_meta=fallback_meta)
             if not gap_df.empty:
                 gap_updated = kr_db.append_rows(gap_df)
                 logger.info(f"[KrDaily] 갭 보완 완료: {gap_updated}년 파일 업데이트")
@@ -356,16 +405,35 @@ def run_kr_daily(args):
     # 3. 오늘 FDR 스냅샷 수집
     logger.info("[KrDaily] 오늘 스냅샷 수집 (FDR StockListing)")
     df = kr_collector.collect_daily()
+
+    used_fallback = False
     if df.empty:
-        logger.error("[KrDaily] 오늘 수집 실패 → 종료")
-        return
+        # FDR StockListing은 KRX가 아니라 제3자 GitHub 캐시 저장소의 날짜별
+        # CSV를 읽는다. 그쪽이 그날치를 안 올리면 세 시장 전부 404다(2026-09-08).
+        # 시세 자체는 yfinance에 있으므로 하루를 통째로 버릴 이유가 없다.
+        logger.warning("[KrDaily] FDR 스냅샷 0건 → yfinance 전량 폴백 시도")
+        if fallback_meta:
+            df = kr_collector.collect_daily_fallback(fallback_meta, today)
+            used_fallback = not df.empty
+        else:
+            logger.error("[KrDaily] 폴백 유니버스도 비어 있음 (기존 parquet 없음)")
+
+    if df.empty:
+        logger.error("[KrDaily] 오늘 수집 실패 (FDR·yfinance 모두 0건) → 실패로 종료")
+        sys.exit(1)
+
+    if used_fallback:
+        logger.warning(
+            f"[KrDaily] yfinance 폴백으로 수집: {len(df):,}종목 "
+            f"(Marcap/Rank 없음 — FDR 복구 후 재수집 대상)"
+        )
 
     # 3b. 누락 종목 yfinance 보완
     #   FDR StockListing은 매매정지·관리종목 등 일부 활성 종목을 누락하는 경우가 있어,
     #   직전 영업일 parquet에 있었으나 오늘 결과에 없는 종목을 yfinance로 재시도.
     #   마지막 거래일이 너무 오래된 종목(>7일)은 상장폐지로 간주하고 스킵.
     try:
-        prior = kr_db.load_year(current_year)
+        prior = pd.DataFrame() if used_fallback else kr_db.load_year(current_year)
         if not prior.empty:
             today_ts = pd.Timestamp(today)
             prior_dates = prior["Date"].dropna().unique()
