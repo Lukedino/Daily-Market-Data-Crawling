@@ -26,6 +26,8 @@ from datetime import date
 from pathlib import Path
 
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -348,3 +350,94 @@ class TestSubsetMergeGate:
         db.save_year(self._panel(self.NEW_DATES, self.NEW), "crypto", 2024,
                      subset_merge=True)
         assert db.load_year("crypto", 2024)["Ticker"].nunique() == 3
+
+
+class TestForeignCalendarRows:
+    """
+    2026-09-05 23:29Z ohlc-daily(us) `CoverageGapError: us_2026 … -99.9% (2026-06-19). 총 4일`.
+
+    Luke Picks 의 U-UN.TO(TSX)는 미국 휴장일(MLK·현충일·준틴스·독립기념일·추수감사절 …)에도
+    거래된다. [BUG-TICKER-SUFFIX] 로 야후 조회가 되기 시작한 첫 실행에서 백필이
+    2020~2026 US 파일 7개에 "U-UN.TO 혼자 있는 날" 34개를 만들었고(부분집합 게이트는
+    기존 파일에 없던 날짜라 통과·업로드), 곧이어 update_market() 의 전체 저장이 그
+    날짜에서 "1,071 → 1 종목" 으로 막혀 US daily 가 매 실행 죽는 상태가 됐다.
+
+    US 파일은 미국 달력에만 맞춘다 — 거래소 접미사 종목의 행은 미국 상장 종목이
+    하나라도 거래된 날짜에만 남긴다. 달력 라이브러리 없이 같은 파일의 미국 종목 존재
+    여부로 판정하므로 2025-01-09(카터 추모 임시 휴장) 같은 비정기 휴장도 함께 잡힌다.
+    """
+
+    UNIVERSE = [f"U{i:04d}" for i in range(200)]
+    TRADING = ["2026-06-17", "2026-06-18", "2026-06-22", "2026-06-23"]
+    HOLIDAY = "2026-06-19"   # 준틴스 — NYSE 휴장, TSX 개장
+
+    def test_regex_is_shared_with_collector(self, db):
+        from data import ohlc_collector
+        assert ohlc_collector._EXCHANGE_SUFFIX_RE is db.EXCHANGE_SUFFIX_RE
+
+    def test_helper_splits_orphan_rows(self, db):
+        df = pd.concat([
+            _rows("AAPL", ["2026-06-18", "2026-06-22"]),
+            _rows("U-UN.TO", ["2026-06-18", "2026-06-19", "2026-06-22"]),
+        ], ignore_index=True)
+        kept, dropped = db.drop_foreign_calendar_rows(df)
+        assert len(dropped) == 1
+        assert dropped.iloc[0]["Ticker"] == "U-UN.TO"
+        assert str(dropped.iloc[0]["Date"]) == "2026-06-19"
+        assert len(kept) == 4
+
+    def test_helper_without_any_domestic_ticker_drops_everything(self, db):
+        df = _rows("U-UN.TO", ["2026-06-18", "2026-06-19"])
+        kept, dropped = db.drop_foreign_calendar_rows(df)
+        assert kept.empty and len(dropped) == 2
+
+    def test_backfill_of_tsx_ticker_drops_us_holiday_row(self, db):
+        """백필 경로(subset_merge) — 휴장일 행은 파일에 들어가지 않고, 거래일 행은 보존."""
+        db.save_year(_universe(self.UNIVERSE, self.TRADING), "us", 2026)
+        db.save_year(_rows("U-UN.TO", self.TRADING + [self.HOLIDAY]), "us", 2026,
+                     subset_merge=True)
+        out = db.load_year("us", 2026)
+        assert self.HOLIDAY not in set(out["Date"].astype(str))
+        assert (out["Ticker"] == "U-UN.TO").sum() == 4
+        assert out["Ticker"].nunique() == 201
+
+    def test_daily_save_on_polluted_file_no_longer_stalls(self, db):
+        """실제 사고 재현 — 구 코드가 남긴 오염 파일(휴장일에 U-UN.TO 혼자) 위에
+        update_market() 의 전체 저장. 이전엔 CoverageGapError, 이제는 저장하면서 치유."""
+        polluted = pd.concat([
+            _universe(self.UNIVERSE, self.TRADING[:2]),
+            _rows("U-UN.TO", self.TRADING[:2] + [self.HOLIDAY]),
+        ], ignore_index=True)
+        path = db.local_path("us", 2026)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(pa.Table.from_pandas(polluted, preserve_index=False), str(path))
+        assert not db.check_coverage_continuity(db.load_year("us", 2026))["ok"]   # 오염 확인
+
+        db.save_year(_universe(self.UNIVERSE + ["U-UN.TO"], [self.TRADING[2]]), "us", 2026)
+
+        out = db.load_year("us", 2026)
+        assert db.check_coverage_continuity(out)["ok"]
+        assert self.HOLIDAY not in set(out["Date"].astype(str))
+        assert (out["Ticker"] == "U-UN.TO").sum() == 3
+        assert out["Ticker"].nunique() == 201
+
+    def test_domestic_collapse_is_still_blocked(self, db):
+        """접미사 종목 정리는 게이트를 약화시키지 않는다 — 미국 종목 자체의 급감은 그대로 막는다."""
+        df = pd.concat([
+            _universe(self.UNIVERSE, ["2026-06-17"]),
+            _universe(self.UNIVERSE[:100], ["2026-06-18"]),
+            _rows("U-UN.TO", ["2026-06-17", "2026-06-18", "2026-06-19"]),
+        ], ignore_index=True)
+        with pytest.raises(db.CoverageGapError) as e:
+            db.save_year(df, "us", 2026)
+        assert "2026-06-18" in str(e.value)
+
+    def test_crypto_market_is_untouched(self, db):
+        """규칙은 US 파일 전용 — 크립토는 24/7 이라 달력 정리가 없다."""
+        df = pd.concat([
+            _universe([f"C{i:03d}-USD" for i in range(150)], ["2026-06-18", "2026-06-19"]),
+            _rows("X.TO", ["2026-06-20"]),
+        ], ignore_index=True)
+        db.save_year(df, "crypto", 2026, allow_gap=True)
+        out = db.load_year("crypto", 2026)
+        assert "2026-06-20" in set(out["Date"].astype(str))

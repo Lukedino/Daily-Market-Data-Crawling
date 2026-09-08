@@ -94,9 +94,9 @@ _SESSION.headers.update({
 # 유니버스 동적 크롤링 — US
 # ══════════════════════════════════════════════════════════════════════════════
 
-# 끝의 거래소 접미사 — 2~3자(.TO .HK .AS .PA .DE .SW .TWO …) + 1자 거래소 코드
-# (.L 런던 / .V TSX-V / .F 프랑크푸르트 / .T 도쿄). 그 외 1자는 클래스 구분자(BRK.B)다.
-_EXCHANGE_SUFFIX_RE = re.compile(r"\.(?:[A-Z]{2,3}|[LVFT])$")
+# 끝의 거래소 접미사 — 정의는 ohlc_db.EXCHANGE_SUFFIX_RE 한 곳. save_year() 가 같은
+# 규칙으로 해외 상장 종목의 미국 휴장일 행을 걸러내므로 두 판정이 어긋나면 안 된다.
+from data.ohlc_db import EXCHANGE_SUFFIX_RE as _EXCHANGE_SUFFIX_RE  # noqa: E402
 
 
 def _normalize_ticker(raw: str) -> str:

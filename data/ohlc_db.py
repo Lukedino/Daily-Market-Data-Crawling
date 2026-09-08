@@ -258,6 +258,32 @@ def check_coverage_continuity(df: pd.DataFrame,
     }
 
 
+# 끝의 거래소 접미사 — 2~3자(.TO .HK .AS .PA .DE .SW .TWO …) + 1자 거래소 코드
+# (.L 런던 / .V TSX-V / .F 프랑크푸르트 / .T 도쿄). 그 외 1자는 클래스 구분자(BRK.B)다.
+# ohlc_collector._normalize_ticker 와 공유한다(정의는 여기 한 곳).
+EXCHANGE_SUFFIX_RE = re.compile(r"\.(?:[A-Z]{2,3}|[LVFT])$")
+
+
+def drop_foreign_calendar_rows(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    거래소 접미사 종목(U-UN.TO 등 해외 상장)의 행 중, 같은 날짜에 접미사 없는(미국
+    상장) 종목이 하나도 없는 날짜의 행을 뺀다. 반환: (남긴 df, 뺀 df).
+
+    US 파일은 미국 달력에만 맞춘다. TSX 는 MLK·현충일·준틴스·독립기념일·추수감사절에
+    열려 있어, 2026-09-05 U-UN.TO 백필이 2020~2026 파일 7개에 "U-UN.TO 혼자 있는 날"
+    34개를 만들었고 곧이어 update_market() 의 전체 저장이 그 날짜에서
+    "1,071 → 1 종목" 으로 연속성 게이트에 막혀 US daily 가 매 실행 죽었다.
+    달력 라이브러리 없이 같은 파일의 미국 종목 존재 여부로 판정하므로
+    2025-01-09(카터 추모 임시 휴장) 같은 비정기 휴장도 함께 잡힌다.
+    """
+    if df.empty or "Ticker" not in df.columns or "Date" not in df.columns:
+        return df, df.iloc[0:0]
+    foreign = df["Ticker"].astype(str).str.strip().str.upper().str.contains(EXCHANGE_SUFFIX_RE)
+    domestic_dates = set(df.loc[~foreign, "Date"])
+    orphan = foreign & ~df["Date"].isin(domestic_dates)
+    return df[~orphan], df[orphan]
+
+
 def save_year(df: pd.DataFrame, market: str, year: int,
               replace_tickers: Optional[list[str]] = None,
               *,
@@ -360,6 +386,26 @@ def save_year(df: pd.DataFrame, market: str, year: int,
     # 컬럼 순서 정렬 (존재하는 컬럼만)
     cols = [c for c in _SCHEMA_COLS if c in df.columns]
     df = df[cols].sort_values(["Ticker", "Date"]).reset_index(drop=True)
+
+    # ── 해외 상장 종목의 미국 휴장일 행 제거 (US 전용) ──────────────────────
+    # 병합 결과 전체에 적용하므로 백필(부분집합)·증분 어느 경로로 들어오든,
+    # 그리고 구 코드가 이미 남긴 오염(2026-09-05)도 다음 저장에서 함께 치유된다.
+    if market == "us":
+        df, dropped = drop_foreign_calendar_rows(df)
+        if not dropped.empty:
+            per = dropped.groupby("Ticker")["Date"].apply(
+                lambda d: ", ".join(str(x) for x in sorted(d)[:8])
+                          + (" …" if len(d) > 8 else "")
+            )
+            detail = "; ".join(f"{t}×{(dropped['Ticker'] == t).sum()} ({dates})"
+                               for t, dates in per.items())
+            logger.warning(
+                f"[OhlcDB] {market}_{year}: 미국 휴장일에 해외 상장 종목만 있는 행 "
+                f"{len(dropped):,}개 제거 — US 파일은 미국 달력에만 맞춘다: {detail}"
+            )
+        if df.empty:
+            logger.warning(f"[OhlcDB] 휴장일 행 제거 후 비어 있음 → 저장 건너뜀: {market}_{year}")
+            return
 
     # ── 축소 가드 ────────────────────────────────────────────────────────
     if "Ticker" in df.columns:
