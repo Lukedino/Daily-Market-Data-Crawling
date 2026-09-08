@@ -54,3 +54,21 @@ jobs:
       - name: Cleanup credentials
         if: always()
         run: rm -f gdrive_creds.json
+
+      # 월 1회 실행이라 한 번 놓치면 그 달 스냅샷이 통째로 비고, 다음 자동 기회는
+      # 한 달 뒤다. ratios 기관보유 추세는 월간 스냅샷 3개가 쌓여야 판정되므로
+      # 한 달 결손이 분기 단위 지연으로 번진다 — 조용히 지나가면 안 된다.
+      - name: Notify failure
+        if: failure()
+        env:
+          TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          MARKET:           ${{ inputs.market || 'all' }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$TELEGRAM_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
+            echo "텔레그램 시크릿 미설정 - 실패 알림 생략"
+            exit 0
+          fi
+          MSG="🚨 Financials Update 실패 — 대상: ${MARKET}. 이번 달 재무·ratios 스냅샷이 수집되지 않았습니다. 월 1회 실행이라 다음 자동 기회는 다음 달 1일입니다. 수동 재실행을 권합니다. 로그: ${RUN_URL}"
+          curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" --data-urlencode "text=${MSG}" > /dev/null

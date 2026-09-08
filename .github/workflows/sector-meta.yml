@@ -55,3 +55,20 @@ jobs:
       - name: Cleanup credentials
         if: always()
         run: rm -f gdrive_creds.json
+
+      # 주 1회 실행이라 놓치면 섹터·산업 태그가 한 주 낡은 채로 남는다. 2026-08-31
+      # 실행이 NameError로 죽은 적이 있는데 그때도 알림이 없어 사람이 발견했다.
+      - name: Notify failure
+        if: failure()
+        env:
+          TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          MARKET:           ${{ inputs.market || 'all' }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$TELEGRAM_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
+            echo "텔레그램 시크릿 미설정 - 실패 알림 생략"
+            exit 0
+          fi
+          MSG="🚨 Sector Meta 수집 실패 — 대상: ${MARKET}. 섹터·산업 태그가 이번 주에 갱신되지 않았습니다. 주 1회 실행이라 다음 자동 기회는 다음 일요일입니다. 로그: ${RUN_URL}"
+          curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" --data-urlencode "text=${MSG}" > /dev/null
