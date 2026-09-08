@@ -122,6 +122,50 @@ def collect_missing_today(
     Returns:
         marcap 스키마 DataFrame (Marcap/Rank=NaN)
     """
+    return _collect_yfinance_day(missing_codes, code_meta, target_date, "누락 종목 보완")
+
+
+def collect_daily_fallback(
+    code_meta: dict[str, dict],
+    target_date: Optional[date] = None,
+) -> pd.DataFrame:
+    """
+    FDR StockListing이 통째로 죽었을 때 당일 **전종목** 스냅샷을 yfinance로 수집.
+
+    2026-09-08 사고: FDR의 StockListing은 KRX가 아니라 제3자 GitHub 캐시
+    저장소의 날짜별 CSV를 읽는다. 그 저장소가 그날치를 안 올리면 세 시장 전부
+    404가 나고 수집이 0건이 된다. 종목 목록·이름·시장 구분은 이미 받아둔
+    parquet에 다 들어있으므로, 그걸 code_meta로 넘겨 당일 시세만 yfinance로
+    받아오면 하루를 통째로 잃지 않는다.
+
+    보완(collect_missing_today)과 기계적으로 같은 경로지만 대상이 전종목이라
+    로그 문구를 구분한다 — 사후에 로그만 보고 "그날 FDR이 죽어서 폴백으로
+    받은 날"임을 알 수 있어야 한다.
+
+    Args:
+        code_meta: {code: {"Name": ..., "Market": ...}} (직전 parquet에서 추출)
+        target_date: 수집 대상 거래일 (기본 today)
+
+    Returns:
+        marcap 스키마 DataFrame (Marcap/Rank=NaN — yfinance에 시총 정보 없음)
+    """
+    return _collect_yfinance_day(sorted(code_meta), code_meta, target_date,
+                                 "FDR 폴백 전종목")
+
+
+def _collect_yfinance_day(
+    codes: list[str],
+    code_meta: dict[str, dict],
+    target_date: Optional[date],
+    label: str,
+) -> pd.DataFrame:
+    """
+    지정한 종목들의 **단일 거래일** 시세를 yfinance로 수집 (marcap 스키마).
+
+    collect_missing_today(일부 종목)와 collect_daily_fallback(전종목)이 공유한다.
+    label은 로그 문구에만 쓰인다 — 어느 경로로 받은 데이터인지 로그로 구분한다.
+    """
+    missing_codes = list(codes)
     if not missing_codes:
         return pd.DataFrame()
 
@@ -147,7 +191,7 @@ def collect_missing_today(
         code_by_yf[yf_t] = code
 
     logger.info(
-        f"[KrCollector] 누락 종목 yfinance 보완: {len(yf_tickers)}종목 "
+        f"[KrCollector] {label} yfinance 수집: {len(yf_tickers)}종목 "
         f"({tgt})"
     )
 
@@ -218,12 +262,12 @@ def collect_missing_today(
         time.sleep(0.5)
 
     if not all_rows:
-        logger.info("[KrCollector] 누락 종목 보완: 유효 결과 없음 (상장폐지·휴장 추정)")
+        logger.info(f"[KrCollector] {label}: 유효 결과 없음 (상장폐지·휴장 추정)")
         return pd.DataFrame()
 
     result = pd.concat(all_rows, ignore_index=True)
     result = result.drop_duplicates(subset=["Code", "Date"], keep="last")
-    logger.info(f"[KrCollector] 누락 종목 보완 완료: {len(result)}종목")
+    logger.info(f"[KrCollector] {label} 완료: {len(result)}종목")
     return result
 
 
@@ -231,16 +275,24 @@ def collect_missing_today(
 # [2] Backfill — yfinance (과거 OHLCV)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def collect_backfill(start_date: str, end_date: str) -> pd.DataFrame:
+def collect_backfill(start_date: str, end_date: str,
+                     fallback_meta: Optional[dict[str, dict]] = None) -> pd.DataFrame:
     """
     yfinance로 과거 기간 전종목 OHLCV 수집.
     - FDR StockListing으로 현재 종목 목록 확보 (Code + Name + Market)
     - yfinance .KS/.KQ 배치 수집 (100종목씩)
     - Marcap / Rank = NaN (과거 시총 정보 없음)
 
+    ⚠️ 시세는 yfinance에서 오지만 **종목 목록은 FDR에서 온다.** 그래서 FDR이
+       죽으면 이 폴백 경로도 함께 죽는다 — 2026-09-08에는 "오늘 못 받아도 내일
+       갭 backfill이 메운다"는 자가 치유가 같은 404로 막혀 있었다.
+       fallback_meta를 넘기면 기존 parquet의 종목 목록으로 대신 돈다.
+
     Args:
         start_date: "YYYY-MM-DD"
         end_date:   "YYYY-MM-DD" (포함)
+        fallback_meta: {code: {"Name": ..., "Market": ...}} — FDR이 종목 목록을
+            한 시장도 못 줄 때 쓸 대체 유니버스. None이면 기존대로 중단한다.
     """
     try:
         import yfinance as yf
@@ -261,7 +313,7 @@ def collect_backfill(start_date: str, end_date: str) -> pd.DataFrame:
         return pd.DataFrame()
 
     # 종목 목록 확보
-    universe = _build_universe(fdr)
+    universe = _build_universe(fdr, fallback_meta=fallback_meta)
     if universe.empty:
         logger.error("[KrCollector] 종목 목록 없음 → backfill 중단")
         return pd.DataFrame()
@@ -370,8 +422,20 @@ def collect_backfill(start_date: str, end_date: str) -> pd.DataFrame:
 # 헬퍼
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _build_universe(fdr) -> pd.DataFrame:
-    """KOSPI + KOSDAQ + KONEX 종목 목록 → Code / Name / Market / yf_ticker."""
+def _build_universe(fdr, fallback_meta: Optional[dict[str, dict]] = None) -> pd.DataFrame:
+    """
+    KOSPI + KOSDAQ + KONEX 종목 목록 → Code / Name / Market / yf_ticker.
+
+    ⚠️ FDR StockListing이 죽으면(2026-09-08의 상류 캐시 404) 이 함수도 함께
+       죽어서, yfinance 백필이라는 폴백 경로 자체가 성립하지 않았다. 종목
+       목록은 이미 받아둔 parquet에 들어있으므로 fallback_meta로 넘기면
+       FDR 없이도 유니버스를 만든다.
+
+    Args:
+        fdr: FinanceDataReader 모듈 (테스트에서 스텁 주입)
+        fallback_meta: {code: {"Name": ..., "Market": ...}} — FDR이 한 시장도
+            못 주면 이걸로 유니버스를 만든다. None이면 기존대로 빈 결과.
+    """
     frames = []
     for market in ["KOSPI", "KOSDAQ", "KONEX"]:
         try:
@@ -391,7 +455,26 @@ def _build_universe(fdr) -> pd.DataFrame:
             logger.warning(f"[KrCollector] {market} 종목 목록 실패: {e}")
 
     if not frames:
-        return pd.DataFrame()
+        if not fallback_meta:
+            return pd.DataFrame()
+        logger.warning(
+            f"[KrCollector] FDR 종목 목록 전멸 → 기존 parquet에서 유니버스 구성 "
+            f"({len(fallback_meta)}종목)"
+        )
+        fb = pd.DataFrame(
+            [
+                {
+                    "Code": str(code).zfill(6),
+                    "Name": (meta or {}).get("Name", "") or "",
+                    "Market": (meta or {}).get("Market") or "KOSPI",
+                }
+                for code, meta in sorted(fallback_meta.items())
+            ]
+        )
+        fb["yf_ticker"] = fb["Code"] + fb["Market"].map(
+            lambda m: _SUFFIX_MAP.get(m, ".KS")
+        )
+        return fb
 
     universe = pd.concat(frames, ignore_index=True)
     universe = universe.drop_duplicates(subset=["Code"]).reset_index(drop=True)
