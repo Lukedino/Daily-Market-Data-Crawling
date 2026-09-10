@@ -46,6 +46,12 @@ jobs:
           python main.py $ARGS
       - name: Upload log
         if: always()
+        # 아티팩트 서비스가 딸꾹하면(FinalizeArtifact 403 등) 이 스텝 실패로 잡 전체가
+        # failure 가 되고, 아래 실패 알림이 '주문/수집이 실패했다'고 단정해 오보를 낸다.
+        # 2026-09-09 실측: 주문 스텝은 success 인데 업로드 403 하나로 '🚨 주문 실패'
+        # 알림이 갔다. 로그 보존은 부수 기능이라 본 작업의 성패를 대변하면 안 된다.
+        # (업로드가 실패해도 GHA 화면의 인라인 로그는 90일 남는다.)
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: financials-log-${{ github.run_id }}
