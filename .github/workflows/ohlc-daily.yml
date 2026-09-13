@@ -2,14 +2,14 @@ name: "OHLC Daily Update — US/Crypto 증분 업데이트"
 
 on:
   schedule:
-    # 매일 22:00 UTC (07:00 KST) — 미국 장마감(16:00 ET = 06:00 KST) 후
-    - cron: '0 22 * * 1-6'
-    # 매일 00:30 UTC (09:30 KST) — 크립토 일봉 마감(UTC 00:00) 직후, crypto 전용.
-    # 크립토는 24/7이라 위 22:00 UTC 실행 시점엔 당일 캔들이 아직 2시간 남은
+    # 매일 22:23 UTC (07:23 KST) — 미국 장마감(16:00 ET = 06:00 KST) 후
+    - cron: '23 22 * * 1-6'
+    # 매일 00:41 UTC (09:41 KST) — 크립토 일봉 마감(UTC 00:00) 직후, crypto 전용.
+    # 크립토는 24/7이라 위 22:23 UTC 실행 시점엔 당일 캔들이 아직 2시간 남은
     # 진행 중 상태다. 이 크론이 없으면 D일 캔들이 확정값으로 Drive에 반영되는
-    # 시점이 D+1일 22:00 UTC — 마감 후 22시간 지연이라 EOD 전략에 쓸 수 없다.
+    # 시점이 D+1일 22:23 UTC — 마감 후 22시간 지연이라 EOD 전략에 쓸 수 없다.
     # 주말에도 거래되므로 요일 제한 없이 매일 실행한다.
-    - cron: '30 0 * * *'
+    - cron: '41 0 * * *'
   workflow_dispatch:
     inputs:
       market:
@@ -40,7 +40,7 @@ jobs:
         run: pip install -r requirements.txt
       - name: OHLC Daily Update
         env:
-          # 00:30 UTC 크론은 크립토 확정 캔들 전용이라 market을 crypto로 고정한다.
+          # 00:41 UTC 크론은 크립토 확정 캔들 전용이라 market을 crypto로 고정한다.
           # workflow_dispatch로 돌리면 github.event.schedule이 빈 값이므로
           # 사용자가 고른 inputs.market이 그대로 쓰인다.
           SCHEDULE:                    ${{ github.event.schedule }}
@@ -51,7 +51,7 @@ jobs:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_APPLICATION_CREDENTIALS }}
           GDRIVE_LUKE_PICKS_FILE_ID:   ${{ secrets.GDRIVE_LUKE_PICKS_FILE_ID }}
         run: |
-          if [ "$SCHEDULE" = "30 0 * * *" ]; then
+          if [ "$SCHEDULE" = "41 0 * * *" ]; then
             MARKET=crypto
           else
             MARKET="$INPUT_MARKET"
@@ -95,7 +95,7 @@ jobs:
             echo "텔레그램 시크릿 미설정 - 실패 알림 생략"
             exit 0
           fi
-          if [ "$SCHEDULE" = "30 0 * * *" ]; then
+          if [ "$SCHEDULE" = "41 0 * * *" ]; then
             MARKET="crypto (일봉 확정 사이클)"
           elif [ -n "$SCHEDULE" ]; then
             MARKET="$INPUT_MARKET (미국 장마감 사이클)"
