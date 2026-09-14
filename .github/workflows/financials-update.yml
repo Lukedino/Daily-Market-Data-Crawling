@@ -23,7 +23,7 @@ permissions:
 jobs:
   update:
     runs-on: ubuntu-latest
-    timeout-minutes: 120   # US 600종목 info 수집은 시간 걸림
+    timeout-minutes: 180   # KR 재무(DART 1000종목, 2026-09-03 신설)로 35분→106~120분. 120이면 여유 0~15분이라 DART 가 느린 날 타임아웃
 
     steps:
       - uses: actions/checkout@v4
