@@ -8,6 +8,7 @@ import pytest
 from data.kr_financials_collector import (
     extract_cumulative_accounts, derive_quarters, build_universe,
     compute_eps, required_reports, quarter_period_date, REPORT_CODES,
+    report_deadline, target_quarters,
 )
 
 
@@ -169,6 +170,39 @@ class TestRequiredReports:
         assert required_reports({1, 2, 3, 4}, {1, 2, 3, 4}) == set()
 
 
+class TestCalendarGate:
+    """공시 달력 게이트(2026-09-14) — 법정 제출기한이 지나지 않은 보고서는 아예 묻지 않는다.
+    실측: 09-04 실행이 미공시 3Q·사업보고서를 1,000종목 × 3회 헛호출해 KR 단계만 70분."""
+
+    def test_report_deadlines_12월_결산(self):
+        assert report_deadline(2026, 1) == date(2026, 5, 15)    # 1분기보고서
+        assert report_deadline(2026, 2) == date(2026, 8, 14)    # 반기보고서
+        assert report_deadline(2026, 3) == date(2026, 11, 14)   # 3분기보고서
+        assert report_deadline(2026, 4) == date(2027, 3, 31)    # 사업보고서는 익년
+
+    def test_deadline_day_itself_is_not_available(self):
+        # 기한 당일은 아직 제출 중 — 다음 날부터 묻는다
+        assert target_quarters(2026, date(2026, 5, 15)) == set()
+        assert target_quarters(2026, date(2026, 5, 16)) == {1}
+
+    def test_targets_grow_with_calendar(self):
+        assert target_quarters(2026, date(2026, 5, 10)) == set()
+        assert target_quarters(2026, date(2026, 9, 14)) == {1, 2}          # 오늘 — 3Q·연간은 미공시
+        assert target_quarters(2026, date(2026, 11, 14)) == {1, 2}
+        assert target_quarters(2026, date(2026, 11, 15)) == {1, 2, 3}
+        assert target_quarters(2026, date(2027, 3, 31)) == {1, 2, 3}
+        assert target_quarters(2026, date(2027, 4, 1)) == {1, 2, 3, 4}
+
+    def test_previous_year_in_january_lacks_only_q4(self):
+        # 1월 실행: 작년 Q4 는 사업보고서(3/31)가 아직이라 제외, 올해는 아무것도 없음
+        assert target_quarters(2025, date(2026, 1, 10)) == {1, 2, 3}
+        assert target_quarters(2026, date(2026, 1, 10)) == set()
+
+    def test_q3_needs_both_half_and_q3_reports(self):
+        # Q3 차분(3Q−반기)은 두 보고서가 다 있어야 하므로 반기 기한만 지난 시점엔 Q3 를 목표로 삼지 않는다
+        assert 3 not in target_quarters(2026, date(2026, 10, 1))
+
+
 def test_quarter_period_date():
     assert quarter_period_date(2026, 1) == date(2026, 3, 31)
     assert quarter_period_date(2026, 2) == date(2026, 6, 30)
@@ -221,7 +255,7 @@ class TestCollectKrFinancials:
         }
         kfc = self._setup(monkeypatch, tmp_path, tables, self._marcap())
         fake = _FakeDart(tables)
-        kfc.collect_kr_financials(top_n=10, upload=False, dart=fake, years=[2026])
+        kfc.collect_kr_financials(top_n=10, upload=False, dart=fake, years=[2026], today=date(2026, 9, 14))
 
         from data import financials_db
         saved = financials_db.load_financials_year("kr", 2026)
@@ -231,6 +265,48 @@ class TestCollectKrFinancials:
         assert by_q.loc[2, "NetIncome"] == 70          # 120-50
         assert by_q.loc[2, "DilutedEPS"] == pytest.approx(0.7)  # 70/100
         assert str(by_q.loc[1, "Ticker"]) == "005930"
+
+    def test_calendar_gate_never_asks_for_unfiled_reports(self, monkeypatch, tmp_path):
+        # 2026-09-14: 1Q·반기만 공시 — 3Q(11014)·사업보고서(11011)는 호출 자체가 없어야 한다
+        tables = {
+            ("005930", 2026, "11013"): _finstate_df([_is_row("당기순이익", "50")]),
+            ("005930", 2026, "11012"): _finstate_df([_is_row("당기순이익", "120")]),
+        }
+        kfc = self._setup(monkeypatch, tmp_path, tables, self._marcap())
+        fake = _FakeDart(tables)
+        kfc.collect_kr_financials(top_n=10, upload=False, dart=fake, years=[2026], today=date(2026, 9, 14))
+        assert {c[2] for c in fake.calls} == {"11013", "11012"}
+
+    def test_calendar_gate_zero_calls_when_filed_quarters_already_stored(self, monkeypatch, tmp_path):
+        # 09-04 실행이 70분 걸린 바로 그 상황 — Q1·Q2 저장됨 + 3Q·연간 미공시 → DART 호출 0건
+        kfc = self._setup(monkeypatch, tmp_path, {}, self._marcap())
+        from data import financials_db
+        financials_db.save_financials(pd.DataFrame([
+            {"Ticker": "005930", "PeriodDate": date(2026, 3, 31), "Year": 2026, "Quarter": 1, "NetIncome": 50.0, "SnapDate": date(2026, 9, 1)},
+            {"Ticker": "005930", "PeriodDate": date(2026, 6, 30), "Year": 2026, "Quarter": 2, "NetIncome": 70.0, "SnapDate": date(2026, 9, 1)},
+        ]), "kr")
+        fake = _FakeDart({})
+        kfc.collect_kr_financials(top_n=10, upload=False, dart=fake, years=[2026], today=date(2026, 9, 14))
+        assert fake.calls == []
+
+    def test_calendar_gate_after_q3_deadline_fetches_half_and_q3_only(self, monkeypatch, tmp_path):
+        # 12-01 실행: Q1·Q2 저장됨, 3Q 기한(11/14) 지남 → 반기(차분 기준)+3Q 두 번만, 사업보고서는 아직
+        tables = {
+            ("005930", 2026, "11012"): _finstate_df([_is_row("당기순이익", "120")]),
+            ("005930", 2026, "11014"): _finstate_df([_is_row("당기순이익", "200")]),
+        }
+        kfc = self._setup(monkeypatch, tmp_path, tables, self._marcap())
+        from data import financials_db
+        financials_db.save_financials(pd.DataFrame([
+            {"Ticker": "005930", "PeriodDate": date(2026, 3, 31), "Year": 2026, "Quarter": 1, "NetIncome": 50.0, "SnapDate": date(2026, 9, 1)},
+            {"Ticker": "005930", "PeriodDate": date(2026, 6, 30), "Year": 2026, "Quarter": 2, "NetIncome": 70.0, "SnapDate": date(2026, 9, 1)},
+        ]), "kr")
+        fake = _FakeDart(tables)
+        kfc.collect_kr_financials(top_n=10, upload=False, dart=fake, years=[2026], today=date(2026, 12, 1))
+        assert {c[2] for c in fake.calls} == {"11012", "11014"}
+        saved = financials_db.load_financials_year("kr", 2026)
+        assert set(saved["Quarter"]) == {1, 2, 3}
+        assert saved.set_index("Quarter").loc[3, "NetIncome"] == 80   # 200-120
 
     def test_incremental_skips_existing_quarters(self, monkeypatch, tmp_path):
         # Q1이 이미 저장돼 있으면 1Q 보고서는 재조회하지 않는다 (반기 차분에 필요한 1은 예외적으로 조회)
@@ -246,7 +322,7 @@ class TestCollectKrFinancials:
         }]), "kr")
 
         fake = _FakeDart(tables)
-        kfc.collect_kr_financials(top_n=10, upload=False, dart=fake, years=[2026])
+        kfc.collect_kr_financials(top_n=10, upload=False, dart=fake, years=[2026], today=date(2026, 9, 14))
         # Q2 산출에 1Q 누적이 필요하므로 11013·11012 조회는 허용되나, Q1 행은 dedup으로 1개 유지
         saved = financials_db.load_financials_year("kr", 2026)
         assert len(saved) == 2
@@ -265,7 +341,7 @@ class TestCollectKrFinancials:
                     raise RuntimeError("DART boom")
                 return _finstate_df([_is_row("당기순이익", "10")])
         kfc = self._setup(monkeypatch, tmp_path, {}, marcap)
-        kfc.collect_kr_financials(top_n=10, upload=False, dart=_BoomDart(), years=[2026])
+        kfc.collect_kr_financials(top_n=10, upload=False, dart=_BoomDart(), years=[2026], today=date(2026, 9, 14))
         from data import financials_db
         saved = financials_db.load_financials_year("kr", 2026)
         assert set(saved["Ticker"]) == {"000660"}   # 실패 종목 스킵, 나머지 계속
@@ -282,7 +358,7 @@ class TestCollectKrFinancials:
                 raise RuntimeError("DART boom")
         kfc = self._setup(monkeypatch, tmp_path, {}, marcap)
         with pytest.raises(RuntimeError):
-            kfc.collect_kr_financials(top_n=10, upload=False, dart=_AllBoomDart(), years=[2026])
+            kfc.collect_kr_financials(top_n=10, upload=False, dart=_AllBoomDart(), years=[2026], today=date(2026, 9, 14))
 
 
 class TestFetchReport:

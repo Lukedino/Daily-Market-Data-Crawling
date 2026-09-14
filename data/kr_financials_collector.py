@@ -121,6 +121,30 @@ def required_reports(existing_quarters: set, target_quarters: set) -> set:
     return needed
 
 
+# 정기보고서 법정 제출기한 (12월 결산 기준, 자본시장법 §160·§159):
+#   1분기보고서 5/15 · 반기보고서 8/14 · 3분기보고서 11/14 · 사업보고서 익년 3/31
+# (연도 오프셋, 월, 일). 기한이 주말이면 실제로는 다음 영업일까지 밀리지만 매월 1일 실행에는 영향 없다.
+_REPORT_DEADLINES = {1: (0, 5, 15), 2: (0, 8, 14), 3: (0, 11, 14), 4: (1, 3, 31)}
+
+
+def report_deadline(year: int, report_key: int) -> date:
+    """`year` 사업연도 보고서(키 1~4 = REPORT_CODES)의 법정 제출기한."""
+    dy, m, d = _REPORT_DEADLINES[report_key]
+    return date(year + dy, m, d)
+
+
+def target_quarters(year: int, today: date) -> set:
+    """공시 달력 게이트(2026-09-14) — 오늘 기준으로 차분에 필요한 보고서가 **전부** 법정 기한을 지난 분기만.
+
+    실측: 09-04 실행이 아직 공시되지 않은 3Q·사업보고서를 1,000종목 × 3회(반기 포함) 헛호출해
+    KR 단계만 70분이 걸렸고, 이 비용은 미공시 보고서가 남아 있는 한 매달 반복된다(사업보고서 뒤엔
+    다음 연도 4개가 전부 미공시). 기한 당일은 아직 제출 중이라 다음 날부터 묻는다. 늦게 공시한 회사·
+    3월 결산 법인은 저장될 때까지 매달 재시도되므로(증분 스킵과 독립) 놓치지 않는다.
+    """
+    available = {rk for rk in REPORT_CODES if today > report_deadline(year, rk)}
+    return {q for q, deps in _QUARTER_DEPS.items() if deps <= available}
+
+
 def quarter_period_date(year: int, quarter: int) -> date:
     """12월 결산 가정 — 분기말 달력일."""
     return {1: date(year, 3, 31), 2: date(year, 6, 30),
@@ -166,13 +190,16 @@ def _fetch_report(dart, code: str, year: int, reprt_code: str):
 
 
 def collect_kr_financials(top_n: int = 1000, upload: bool = True,
-                          dart=None, years: list | None = None):
+                          dart=None, years: list | None = None,
+                          today: date | None = None):
     """KR 시총 상위 top_n 종목의 분기 재무 수집 (스펙 §A).
 
     1. marcap 최신 스냅샷 → 유니버스 (kr_db.download_year + load_year)
     2. ensure_drive_baseline('kr', financials만) — failed면 중단
-    3. 종목별: 기존 분기 확인 → 부족 분기의 필요 보고서만 DART 조회 → 누적 차분 → EPS
+    3. 종목별: 기존 분기 확인 → 공시 기한이 지난 분기(`target_quarters`) 중 부족한 것의
+       필요 보고서만 DART 조회 → 누적 차분 → EPS
     4. 50종목마다 중간 저장·업로드 (US 수집기와 동일 패턴)
+    `today` 는 테스트용 주입(기본 오늘) — 공시 달력 게이트와 SnapDate 에 쓴다.
     """
     from datetime import date as _date
     from data import financials_db, kr_db
@@ -211,7 +238,10 @@ def collect_kr_financials(top_n: int = 1000, upload: bool = True,
     if dart is None:
         dart = _get_dart()
 
-    snap = _date.today()
+    snap = today or _date.today()
+    targets = {y: target_quarters(y, snap) for y in years}
+    for y in years:
+        logger.info(f"[KrFinancials] {y}년 목표 분기 {sorted(targets[y]) or '없음'} (공시 기한 기준 {snap})")
     rows: list[dict] = []
     failed: list[str] = []
     codes = list(universe["Code"])
@@ -231,9 +261,9 @@ def collect_kr_financials(top_n: int = 1000, upload: bool = True,
     for idx, code in enumerate(it, start=1):
         try:
             for y in years:
-                # 목표 분기: 과거 연도는 4개 전부, 당해 연도도 4개 시도(미공시 보고서는 응답 없음 → 자연 결측)
+                # 목표 분기: 공시 기한이 지난 분기만(2026-09-14 이전엔 4개 전부 시도해 미공시 보고서를 매달 헛호출)
                 have = {q for (yy, q) in existing.get(code, set()) if yy == y}
-                need_reports = required_reports(have, {1, 2, 3, 4})
+                need_reports = required_reports(have, targets[y])
                 if not need_reports:
                     continue
                 cums = {}
