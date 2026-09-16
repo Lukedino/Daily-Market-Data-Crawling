@@ -1,15 +1,11 @@
 name: "OHLC Daily Update — US/Crypto 증분 업데이트"
 
 on:
-  schedule:
-    # 매일 22:23 UTC (07:23 KST) — 미국 장마감(16:00 ET = 06:00 KST) 후
-    - cron: '23 22 * * 1-6'
-    # 매일 00:41 UTC (09:41 KST) — 크립토 일봉 마감(UTC 00:00) 직후, crypto 전용.
-    # 크립토는 24/7이라 위 22:23 UTC 실행 시점엔 당일 캔들이 아직 2시간 남은
-    # 진행 중 상태다. 이 크론이 없으면 D일 캔들이 확정값으로 Drive에 반영되는
-    # 시점이 D+1일 22:23 UTC — 마감 후 22시간 지연이라 EOD 전략에 쓸 수 없다.
-    # 주말에도 거래되므로 요일 제한 없이 매일 실행한다.
-    - cron: '41 0 * * *'
+  # 예약 실행은 Personal Assistant 저장소의 apps/orchestrator/config/gha-schedules.json
+  # (ohlc-us: 22:23 UTC 월~토 market=all · ohlc-crypto: 00:41 UTC 매일 market=crypto)이
+  # Cloud Scheduler tick 으로 workflow_dispatch 를 호출해 깨운다(2026-09-16 이관).
+  # GitHub schedule 은 예약 큐 지연이 1.5~5시간이라 폐기. cron 을 되살리려면
+  # 그쪽 항목을 enabled:false 로 바꾼 뒤 여기에 schedule: 블록을 복원한다.
   workflow_dispatch:
     inputs:
       market:
