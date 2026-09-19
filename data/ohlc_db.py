@@ -150,6 +150,15 @@ class CoverageShrinkError(RuntimeError):
     """저장하면 기존보다 종목 수가 크게 줄어드는 경우. 저장·업로드를 중단한다."""
 
 
+class DriveSyncError(RuntimeError):
+    """Drive 와의 동기화가 깨진 상태로는 저장·커서 갱신을 진행하지 않는다.
+
+    D-01  기존 연도 파일 다운로드 **실패**("없음" 이 아니다) → 그대로 저장하면 그 연도가 증분 며칠 치로 교체된다.
+    D-02  업로드 실패 → 커서(db_status.json)를 전진시키면 그날은 다시 수집되지 않는다.
+    예외로 올려 프로세스를 비정상 종료시키면 워크플로의 실패 알림이 울린다.
+    """
+
+
 def _norm_tickers(values) -> set:
     return {str(t).strip().upper() for t in values}
 
@@ -583,19 +592,24 @@ def _get_uploader(uploader=None):
         return None
 
 
-def upload_years(market: str, years: list[int], uploader=None):
-    """지정 연도 Parquet 파일을 Drive에 업로드."""
+def upload_years(market: str, years: list[int], uploader=None) -> list[str]:
+    """지정 연도 Parquet 파일을 Drive에 업로드하고 **실패한 파일 이름 목록**을 돌려준다.
+
+    예전에는 예외를 로그로 삼키고 아무것도 돌려주지 않아, 호출자가 업로드 실패를 모른 채
+    커서를 전진시켰다(D-02). 호출자는 반환값이 비어 있지 않으면 상태를 갱신하면 안 된다.
+    """
     u = _get_uploader(uploader)
     if u is None:
         logger.warning("[OhlcDB] uploader 없음 → 업로드 건너뜀")
-        return
+        return [f"{market}_{year}.parquet" for year in years]
 
     remote_key = f"ohlc_{market}"
     remote_path = config.DRIVE_PATHS.get(remote_key)
     if not remote_path:
         logger.error(f"[OhlcDB] DRIVE_PATHS에 '{remote_key}' 없음")
-        return
+        return [f"{market}_{year}.parquet" for year in years]
 
+    failed: list[str] = []
     for year in years:
         path = local_path(market, year)
         if not path.exists():
@@ -604,7 +618,10 @@ def upload_years(market: str, years: list[int], uploader=None):
         try:
             u.upload(str(path), remote_path)
         except Exception as e:
-            logger.error(f"[OhlcDB] {path.name} 업로드 실패: {e}")
+            # 공개 저장소 로그다. 예외 문자열에는 Drive 파일·폴더 ID 가 실릴 수 있어 종류만 남긴다.
+            logger.error(f"[OhlcDB] {path.name} 업로드 실패: {type(e).__name__}")
+            failed.append(path.name)
+    return failed
 
 
 def download_year(market: str, year: int, uploader=None) -> bool:

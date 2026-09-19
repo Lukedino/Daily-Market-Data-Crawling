@@ -363,7 +363,14 @@ def run_kr_daily(args):
     # 1. Drive에서 현재 연도 parquet 다운로드 (로컬에 없을 때)
     if not kr_db.local_path(current_year).exists():
         logger.info(f"[KrDaily] marcap-{current_year}.parquet 로컬 없음 → Drive 다운로드 시도")
-        kr_db.download_year(current_year)
+        if args.upload_drive:
+            # 다운로드 "실패" 를 "없음" 으로 취급하면 아래 갭 백필이 1/1 부터 새 파일을 만들어
+            # Drive 의 당해 연도를 교체한다 — Marcap·Rank 과거값은 다시 받을 수 없다(D-01).
+            if kr_db.download_year_state(current_year) == "failed":
+                logger.error("[KrDaily] 기준 파일 다운로드 실패 — 덮어쓰지 않고 중단한다")
+                sys.exit(1)
+        else:
+            kr_db.download_year(current_year)
 
     # 1b. 폴백용 종목 목록 — FDR이 죽어도 쓸 수 있도록 미리 뽑아둔다.
     #     갭 backfill(_build_universe)과 당일 폴백이 둘 다 FDR에 의존하고 있어서
@@ -482,7 +489,11 @@ def run_kr_daily(args):
 
     # 5. Drive 업로드
     if args.upload_drive and updated:
-        kr_db.upload_years(updated)
+        failed_files = kr_db.upload_years(updated)
+        if failed_files:
+            # 조용히 넘어가면 오늘의 Marcap·Rank 스냅샷이 Drive 에 없는 채로 초록색이 된다(D-02).
+            logger.error(f"[KrDaily] Drive 업로드 실패: {failed_files}")
+            sys.exit(1)
         logger.info(f"[KrDaily] Drive 업로드 완료: {updated}")
 
 
@@ -529,7 +540,10 @@ def run_kr_backfill(args):
     kr_db.save_status(last_date.date() if hasattr(last_date, "date") else last_date, total_days)
 
     if args.upload_drive and updated:
-        kr_db.upload_years(updated)
+        failed_files = kr_db.upload_years(updated)
+        if failed_files:
+            logger.error(f"[KrBackfill] Drive 업로드 실패: {failed_files}")
+            sys.exit(1)
         logger.info(f"[KrBackfill] Drive 업로드 완료: {updated}")
 
 

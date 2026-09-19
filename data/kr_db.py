@@ -196,13 +196,18 @@ def _get_uploader(uploader=None):
         return None
 
 
-def upload_years(years: list[int], uploader=None):
-    """지정 연도 Parquet을 Drive kr/ 폴더에 업로드."""
+def upload_years(years: list[int], uploader=None) -> list[str]:
+    """지정 연도 Parquet을 Drive kr/ 폴더에 업로드하고 **실패한 파일 이름 목록**을 돌려준다.
+
+    예전에는 예외를 로그로 삼켜 호출자가 "Drive 업로드 완료" 를 무조건 찍었다(D-02).
+    그날의 Marcap·Rank 는 FDR 당일 스냅샷이라 다시 받을 수 없으므로, 실패는 반드시 드러나야 한다.
+    """
     u = _get_uploader(uploader)
     if u is None:
-        return
+        return [f"marcap-{year}.parquet" for year in years]
 
     remote_path = config.DRIVE_PATHS.get("ohlc_kr")
+    failed: list[str] = []
     for year in years:
         path = local_path(year)
         if not path.exists():
@@ -212,7 +217,38 @@ def upload_years(years: list[int], uploader=None):
             u.upload(str(path), remote_path)
             logger.info(f"[KrDB] Drive 업로드 완료: {path.name}")
         except Exception as e:
-            logger.error(f"[KrDB] {path.name} 업로드 실패: {e}")
+            # 공개 저장소 로그 — 예외 문자열(Drive ID 포함 가능) 대신 종류만 남긴다.
+            logger.error(f"[KrDB] {path.name} 업로드 실패: {type(e).__name__}")
+            failed.append(path.name)
+    return failed
+
+
+def download_year_state(year: int, uploader=None) -> str:
+    """Drive 다운로드 결과를 세 상태로 구분한다: "ok" | "absent" | "failed".
+
+    download_year() 는 "Drive 에 없음" 과 "다운로드 실패" 를 모두 False 로 돌려준다. 실패를 없음으로
+    취급하면 run_kr_daily 가 1/1 부터 백필한 파일로 당해 연도를 교체하고, yfinance 로는 복구되지 않는
+    Marcap·Rank·Stocks·Amount 과거값이 사라진다(D-01, ohlc_db.download_year_state 와 같은 규칙).
+    """
+    u = _get_uploader(uploader)
+    if u is None:
+        logger.error("[KrDB] 업로더 없음 — Drive 상태를 확인할 수 없다")
+        return "failed"
+
+    remote_path = config.DRIVE_PATHS.get("ohlc_kr")
+    filename = f"marcap-{year}.parquet"
+    dest = local_path(year)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        u.download(remote_path, filename, str(dest))
+        logger.info(f"[KrDB] Drive 다운로드 완료: {filename}")
+        return "ok"
+    except FileNotFoundError:
+        logger.info(f"[KrDB] Drive 에 아직 없음: {filename}")
+        return "absent"
+    except Exception as e:
+        logger.error(f"[KrDB] {filename} 다운로드 실패: {type(e).__name__}")
+        return "failed"
 
 
 def download_year(year: int, uploader=None) -> bool:

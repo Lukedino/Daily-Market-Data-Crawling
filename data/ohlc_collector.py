@@ -1214,7 +1214,13 @@ def update_market(
     current_year = end_date.year
     if not ohlc_db.local_path(market, current_year).exists():
         logger.info(f"[OhlcCollector] {market}_{current_year}.parquet 로컬 없음 → Drive 다운로드 시도")
-        ohlc_db.download_year(market, current_year)
+        # "Drive 에 없음"(absent)과 "다운로드 실패"(failed)는 다르다. 실패한 채로 append 하면 로컬에는
+        # 증분 며칠 치만 있어 그 파일이 당해 연도 전체를 교체한다(D-01). 백필 경로에만 있던 가드를 여기에도 둔다.
+        if upload and ohlc_db.download_year_state(market, current_year) == "failed":
+            raise ohlc_db.DriveSyncError(
+                f"{market}_{current_year}.parquet 다운로드 실패 — 덮어쓰지 않고 중단한다")
+        elif not upload:
+            ohlc_db.download_year(market, current_year)
 
     # 6. 수집
     try:
@@ -1237,7 +1243,10 @@ def update_market(
     # 7. append + 업로드
     updated_years = ohlc_db.append_rows(new_df, market)
     if upload and updated_years:
-        ohlc_db.upload_years(market, updated_years)
+        failed_files = ohlc_db.upload_years(market, updated_years)
+        if failed_files:
+            # 커서를 전진시키지 않는다 — 다음 실행이 같은 날짜를 다시 수집한다(D-02).
+            raise ohlc_db.DriveSyncError(f"업로드 실패 {failed_files} — 상태를 갱신하지 않고 중단한다")
 
     # 8. 상태 갱신
     if "Date" in new_df.columns:

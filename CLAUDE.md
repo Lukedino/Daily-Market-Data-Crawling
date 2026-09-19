@@ -180,6 +180,22 @@ python scripts/verify_kr.py --drive --fix
 
 ## 주요 이력
 
+### 2026-09-20 — 증분 경로의 Drive 동기화 불변식 (D-01 · D-02)
+2026-09-19 심층 검토에서 **매일 도는 증분 경로**에 백필 경로와 같은 구멍이 남아 있음이 재현됐다.
+- **D-01** `update_market()`·`run_kr_daily()` 가 `download_year()` 의 False("없음" 과 "실패" 를 구분 못 함)를 무시하고 진행했다.
+  다운로드는 실패하고 업로드는 성공하는 부분 장애 한 번이면 **당해 연도 파일이 증분 며칠 치로 교체**돼 올라간다.
+  KR 은 1/1 부터 yfinance 로 재백필되지만 `Marcap`·`Rank`·`Stocks`·`Amount` 과거값은 다시 받을 수 없다.
+  → `ohlc_db.download_year_state()` 3상태 가드를 증분 경로에도 적용, `kr_db.download_year_state()` 신설. `failed` 면 저장·업로드 없이 비정상 종료.
+- **D-02** `upload_years()` 가 예외를 로그로 삼키고 아무것도 돌려주지 않아, 업로드가 실패해도 커서(`db_status.json`)가 전진했다.
+  US 는 `last_date+1` 부터만 조회하므로 그날이 **영구 구멍**이 되고 워크플로는 초록, 알림 없음.
+  → `upload_years()` 가 실패한 파일 이름 목록을 반환. 실패가 있으면 상태를 갱신하지 않고 `DriveSyncError`/`sys.exit(1)` → 기존 실패 알림이 울린다.
+- 공개 저장소라 업로드·다운로드 실패 로그에는 예외 문자열(Drive ID 가 실릴 수 있음) 대신 예외 종류만 남긴다.
+- 테스트 176 → 186 (`tests/test_incremental_drive_sync.py`).
+- **남은 것**(같은 검토): 백필 경로의 `upload_years` 반환값 미확인(`ohlc_collector.py` 2곳), 크립토 7일 재조회가 기존 `MarketCap` 을 NaN 으로 덮음(D-05),
+  배치 실패가 연속성 게이트(10%) 아래로 통과(D-04), 증분 `auto_adjust=True` + `Splits`·`Dividends` 하드코딩(D-03, 설계), `load_*_year` 가 읽기 예외를 삼켜 병합 가드가 죽은 코드(D-06),
+  `collection.log` 아티팩트에 DART 키 쿼리스트링·Drive ID 가 실릴 수 있음(D-07), `sector-meta.yml` 의 boolean 비교로 dry-run 이 실제 업로드(D-09).
+  참고: "`financials-update` 가 ratios 이력을 매 실행 지운다" 는 2026-09-01 `15bfd12` 에서 **이미 수정**됐다.
+
 | 날짜 | 변경 내용 |
 |------|---------|
 | 2026-09-14 | **[PERF-KR-FIN-CALENDAR-GATE]** financials-update 가 KR 재무 신설(09-03) 뒤 105~120분이 됐는데, **첫 수집 비용이 아니라 매달 반복되는 헛호출**이었다. 09-04(두 번째) 실행 로그 실측: US 33분 · Crypto 1분 · **KR 70분**(1,000종목 × 4.2초). 수집 대상은 작년+올해 2년뿐이고 증분 스킵도 있지만, 당해 연도의 **아직 공시되지 않은 분기**(9월엔 3Q·4Q)를 매번 목표로 삼아 차분에 필요한 반기·3Q·사업보고서 **3회를 종목마다 빈 응답으로 받고** 있었다 — 11월 3Q 공시 뒤엔 2회, 3월 사업보고서 뒤엔 다음 연도 4개가 전부 미공시라 4회(≈93분), 즉 영구 반복. → `target_quarters(year, today)`: 정기보고서 **법정 제출기한**(1Q 5/15·반기 8/14·3Q 11/14·사업보고서 익년 3/31, `_REPORT_DEADLINES`)이 차분 의존 보고서 전부에서 지난 분기만 목표. 기한 당일은 제외(다음 날부터). 효과(매월 1일 실행): 6·9·12·4월에만 새 분기 1개 수집(25~47분), 나머지 8개월은 **DART 호출 0건**(늦게 공시한 회사만 재시도). 실행 로그에 `{연도}년 목표 분기 [...]` 한 줄이 찍힌다. `collect_kr_financials(today=)` 주입 인자 추가(테스트 결정성). `timeout-minutes` 180 은 그대로 둔다. 테스트 +9(`TestCalendarGate` 5 + 통합 3 + 기존 4건에 today 고정). Personal Assistant GHA 감시의 DURATION_SPIKE 도 같은 날 "연속 두 번이면 새 기준" 규칙으로 보정됨 |
