@@ -62,12 +62,20 @@ US 주식/ETF, 크립토, KR(한국) 시장 OHLC + 재무데이터를 수집해 
 |------|--------|------|
 | `kr-daily.yml` | 평일 UTC 07:30 (KST 16:30) | KR 일별 스냅샷 수집 + 자동 갭 보정 |
 | `kr-backfill.yml` | workflow_dispatch | KR 누락 구간 과거 수집 |
-| `ohlc-daily.yml` | 월~토 UTC 22:00 (KST 07:00) | US/Crypto OHLC 일별 수집 |
-| `ohlc-daily.yml` | **매일 UTC 00:30 (KST 09:30)** | **Crypto 전용** — 일봉 마감(UTC 00:00) 직후 확정 캔들 수집 |
+| `ohlc-daily.yml` | 외부 디스패처 → workflow_dispatch, 월~토 UTC 22:23 (KST 다음 날 07:23) | US/Crypto OHLC 일별 수집 |
+| `ohlc-daily.yml` | 외부 디스패처 → workflow_dispatch, 매일 UTC 00:41 (KST 09:41) | Crypto 전용 — 전일 확정 캔들 수집 |
 | `ohlc-backfill.yml` | workflow_dispatch | US/Crypto OHLC 과거 수집 |
 | `ohlc-new-ticker-backfill.yml` | workflow_dispatch | 유니버스에 새로 추가된 종목만 골라 과거 이력 백필 (daily에도 자동 통합됨) |
 | `financials-update.yml` | 자동 | US/KR 재무데이터 수집 (KR은 DART, 시총 상위 1,000) |
 | `sector-meta.yml` | 매주 일요일 UTC 01:00 (KST 10:00) | US/Crypto Sector/Industry/Market 태그 수집 |
+
+7개 워크플로는 Drive 연도 파일과 `_meta`를 공유하므로 같은 concurrency 그룹
+`daily-market-drive-writer`에서 하나씩 실행한다. `cancel-in-progress: false`와
+`queue: max`를 사용해 실행 중 작업을 유지하고 최대 100개까지 대기시킨다.
+긴 백필·재무 작업은 후속 일간 수집을 지연시킬 수 있으며, 대기 순서는 디스패치 순서와
+항상 같지는 않다. 이 제한은 같은 저장소의 같은 그룹에 참여하는 Actions 실행에만 적용된다.
+로컬 CLI·유지보수 스크립트·다른 저장소의 Drive 쓰기는 별도로 실행 시간을 조율해야 한다.
+사양: [GitHub workflow concurrency](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency).
 
 > **실패 알림**: 예약 실행 4개(`kr-daily`·`ohlc-daily`·`financials-update`·`sector-meta`)는 실패 시
 > 텔레그램으로 알린다. **성공하면 아무 메시지도 오지 않는다 — 조용한 게 정상이다.**
@@ -179,6 +187,15 @@ python scripts/verify_kr.py --drive --fix
 ---
 
 ## 주요 이력
+
+### 2026-09-22 — 연도 기준본 보존 및 업로드 완료 확인
+- OHLC 전체/신규 백필·여러 연도에 걸친 증분, KR 백필은 저장 대상 연도의 기준본을 먼저 확인한다. Drive의 `absent`와 `failed`를 구분하고 실패·손상은 저장/업로드를 중단한다.
+- 기존 연도 파일은 strict 읽기 후 병합한다. 다운로드와 Parquet 저장은 임시 파일을 검증한 뒤 교체하여 중간 실패로 정상 파일을 훼손하지 않는다.
+- KR OHLC 백필은 기존 `(Code, Date)` 이력을 유지하며, 다시 받을 수 없는 `Marcap`·`Stocks`·`Rank`와 기존 실측 `Amount`를 결측값이나 추정치로 지우지 않는다.
+- OHLC 연도/상태/재시도 목록 업로드 실패는 호출자에게 전달한다. 확인되지 않은 업로드를 완료 커서나 재시도 목록 제거로 처리하지 않는다.
+- 7개 Actions workflow의 Drive 쓰기를 공통 concurrency 그룹에서 직렬화한다. `sector-meta`의 boolean dry-run 입력도 올바르게 전달한다. 기존 예약/외부 디스패치 방식은 유지한다.
+- 격리된 코드 사본에서 전체 테스트 **266 passed / 기존 3 skipped**를 확인했다(이전 186 passed에서 회귀 검사 80개 추가). 합성 parquet·가짜 Drive로 검사했으며 네트워크·운영 파일 접근 시도는 0건이다. 기존 CMC 테스트의 localhost 연결도 합성 오류로 대체했다. Workflow YAML 7개와 가짜 Python을 사용한 sector-meta 인수 전달 4개 사례도 통과했다.
+- 이 변경은 실제 Drive 데이터의 복구나 전체 품질 검증이 아니다. 조정주가 정책, 부분 종목 수집과 날짜 완결성, Crypto `MarketCap` 결측 덮어쓰기, 재무/sector-meta의 나머지 실패 경로는 후속 검토 범위다. 수동 `resave_ohlc.py --upload`의 업로드 결과 처리와 `verify_ohlc.py --fix`의 원격 기준본/동시 실행도 별도 개선이 필요하다.
 
 ### 2026-09-20 — 증분 경로의 Drive 동기화 불변식 (D-01 · D-02)
 2026-09-19 심층 검토에서 **매일 도는 증분 경로**에 백필 경로와 같은 구멍이 남아 있음이 재현됐다.

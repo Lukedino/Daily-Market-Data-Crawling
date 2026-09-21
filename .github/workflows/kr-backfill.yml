@@ -19,6 +19,12 @@ on:
 permissions:
   contents: read
 
+# All markets share Drive metadata; retain queued jobs as well as the active job.
+concurrency:
+  group: daily-market-drive-writer
+  cancel-in-progress: false
+  queue: max
+
 jobs:
   kr-backfill:
     runs-on: ubuntu-latest

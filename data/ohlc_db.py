@@ -11,7 +11,9 @@ data/ohlc_db.py — US/Crypto OHLC 로컬 Parquet DB 관리
 
 import json
 import logging
+import os
 import re
+import tempfile
 from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
@@ -53,19 +55,49 @@ def local_path(market: str, year: int) -> Path:
 # 읽기 / 저장
 # ══════════════════════════════════════════════════════════════════════════════
 
-def load_year(market: str, year: int) -> pd.DataFrame:
+def _read_year_path(path: Path, year: int | None = None) -> pd.DataFrame:
+    df = pq.read_table(str(path)).to_pandas()
+    if df.empty:
+        return df if len(df.columns) else pd.DataFrame(columns=_SCHEMA_COLS)
+    if df.columns.has_duplicates or not {"Ticker", "Date"}.issubset(df.columns):
+        raise ValueError("OHLC key columns missing/duplicated")
+    df["Date"] = pd.to_datetime(df["Date"], errors="raise").dt.date
+    if df["Date"].isna().any() or df["Ticker"].isna().any() or df["Ticker"].astype(str).str.strip().eq("").any():
+        raise ValueError("OHLC keys invalid")
+    if df.duplicated(["Ticker", "Date"]).any():
+        raise ValueError("OHLC duplicate keys")
+    if year is not None and any(day.year != year for day in df["Date"]):
+        raise ValueError("OHLC year partition mismatch")
+    return df
+
+
+def _temporary_path(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
+    os.close(fd)
+    return Path(temporary)
+
+
+def _atomic_json(path: Path, value: dict):
+    temporary = _temporary_path(path)
+    try:
+        temporary.write_text(json.dumps(value, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def load_year(market: str, year: int, *, strict: bool = False) -> pd.DataFrame:
     """연도별 Parquet 로드. 파일 없으면 빈 DataFrame 반환."""
     path = local_path(market, year)
     if not path.exists():
         return pd.DataFrame(columns=_SCHEMA_COLS)
     try:
-        df = pq.read_table(str(path)).to_pandas()
-        # Date 컬럼을 date 타입으로 통일
-        if "Date" in df.columns:
-            df["Date"] = pd.to_datetime(df["Date"]).dt.date
-        return df
+        return _read_year_path(path, year)
     except Exception as e:
-        logger.error(f"[OhlcDB] {path.name} 로드 실패: {e}")
+        logger.error(f"[OhlcDB] {path.name} 로드 실패: {type(e).__name__}")
+        if strict:
+            raise DriveSyncError(f"{path.name} 기존 파일 검증 실패") from None
         return pd.DataFrame(columns=_SCHEMA_COLS)
 
 
@@ -213,16 +245,45 @@ def download_year_state(market: str, year: int, uploader=None) -> str:
 
     filename = f"{market}_{year}.parquet"
     dest = local_path(market, year)
-    dest.parent.mkdir(parents=True, exist_ok=True)
+    temporary = _temporary_path(dest)
     try:
-        u.download(remote_path, filename, str(dest))
+        existing = _read_year_path(dest, year) if dest.exists() else pd.DataFrame()
+        u.download(remote_path, filename, str(temporary))
+        downloaded = _read_year_path(temporary, year)
+        if not existing.empty:
+            if downloaded.empty:
+                merged = existing
+            else:
+                # Retain local-only, not-yet-uploaded history; current remote
+                # non-null values take precedence on shared keys.
+                merged = downloaded.set_index(["Ticker", "Date"]).combine_first(
+                    existing.set_index(["Ticker", "Date"])).reset_index()
+            pq.write_table(pa.Table.from_pandas(merged, preserve_index=False), str(temporary), compression="snappy")
+            pd.testing.assert_frame_equal(_read_year_path(temporary, year), merged,
+                                          check_dtype=False, check_exact=True)
+        os.replace(temporary, dest)
         return "ok"
     except FileNotFoundError:
         logger.info(f"[OhlcDB] Drive에 없음(최초 적재로 간주): {filename}")
         return "absent"
     except Exception as e:
-        logger.error(f"[OhlcDB] {filename} 다운로드 실패: {e}")
+        logger.error(f"[OhlcDB] {filename} 다운로드 실패: {type(e).__name__}")
         return "failed"
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def ensure_year_baselines(market: str, years, *, download: bool = True) -> dict[int, str]:
+    """Validate every affected baseline before a caller starts saving any year."""
+    states = {}
+    for year in sorted(set(years)):
+        if local_path(market, year).exists():
+            load_year(market, year, strict=True)
+        states[year] = (download_year_state(market, year) if download else
+                        "ok" if local_path(market, year).exists() else "absent")
+        if states[year] not in ("ok", "absent"):
+            raise DriveSyncError(f"{market}_{year} 기준 파일 확인 실패 — 저장 중단")
+    return states
 
 
 COVERAGE_DROP_PCT = 10.0
@@ -356,7 +417,7 @@ def save_year(df: pd.DataFrame, market: str, year: int,
     existing_dates: set = set()   # subset_merge 게이트 범위 — 기존 파일이 커버하던 날짜
     if path.exists():
         try:
-            existing = (load_year(market, year) if _existing_override is None
+            existing = (load_year(market, year, strict=True) if _existing_override is None
                         else _existing_override)
             if not existing.empty:
                 if subset_merge and "Date" in existing.columns:
@@ -381,7 +442,7 @@ def save_year(df: pd.DataFrame, market: str, year: int,
             # 기존 데이터를 보존할 수 없다는 뜻이므로 덮어쓰면 안 된다.
             raise CoverageShrinkError(
                 f"{market}_{year} 기존 파일 병합 실패 — 덮어쓰지 않고 중단한다. "
-                f"원인: {e}"
+                f"원인: {type(e).__name__}"
             ) from e
 
     if df.empty:
@@ -455,7 +516,14 @@ def save_year(df: pd.DataFrame, market: str, year: int,
             )
 
     table = pa.Table.from_pandas(df, preserve_index=False)
-    pq.write_table(table, str(path), compression="snappy")
+    temporary = _temporary_path(path)
+    try:
+        pq.write_table(table, str(temporary), compression="snappy")
+        pd.testing.assert_frame_equal(_read_year_path(temporary, year), df.reset_index(drop=True),
+                                      check_dtype=False, check_exact=True)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
     size_kb = path.stat().st_size / 1024
     logger.info(
@@ -527,21 +595,17 @@ def load_status() -> dict:
         return {}
     try:
         with open(_STATUS_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
+            result = json.load(f)
+        if not isinstance(result, dict):
+            raise ValueError("status must be an object")
+        return result
     except Exception as e:
-        logger.error(f"[OhlcDB] status 로드 실패: {e}")
-        return {}
+        raise DriveSyncError(f"status 로드 실패: {type(e).__name__}") from None
 
 
 def save_status(status: dict):
     """db_status.json 저장."""
-    _STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        with open(_STATUS_PATH, "w", encoding="utf-8") as f:
-            json.dump(status, f, indent=2, ensure_ascii=False, default=str)
-        logger.debug(f"[OhlcDB] status 저장 완료: {_STATUS_PATH}")
-    except Exception as e:
-        logger.error(f"[OhlcDB] status 저장 실패: {e}")
+    _atomic_json(_STATUS_PATH, status)
 
 
 def update_status(market: str, last_date: date, ticker_count: int,
@@ -614,9 +678,12 @@ def upload_years(market: str, years: list[int], uploader=None) -> list[str]:
         path = local_path(market, year)
         if not path.exists():
             logger.warning(f"[OhlcDB] 업로드 대상 없음: {path.name}")
+            failed.append(path.name)
             continue
         try:
-            u.upload(str(path), remote_path)
+            load_year(market, year, strict=True)
+            if u.upload(str(path), remote_path) is False:
+                raise DriveSyncError("Drive upload rejected")
         except Exception as e:
             # 공개 저장소 로그다. 예외 문자열에는 Drive 파일·폴더 ID 가 실릴 수 있어 종류만 남긴다.
             logger.error(f"[OhlcDB] {path.name} 업로드 실패: {type(e).__name__}")
@@ -626,73 +693,95 @@ def upload_years(market: str, years: list[int], uploader=None) -> list[str]:
 
 def download_year(market: str, year: int, uploader=None) -> bool:
     """Drive에서 연도별 Parquet 다운로드. 성공 True, 실패 False."""
+    return download_year_state(market, year, uploader) == "ok"
+
+
+def _download_metadata(path: Path, uploader=None) -> bool:
     u = _get_uploader(uploader)
-    if u is None:
-        return False
-
-    remote_key = f"ohlc_{market}"
-    remote_path = config.DRIVE_PATHS.get(remote_key)
-    if not remote_path:
-        logger.error(f"[OhlcDB] DRIVE_PATHS에 '{remote_key}' 없음")
-        return False
-
-    filename = f"{market}_{year}.parquet"
-    dest = local_path(market, year)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-
+    remote_path = config.DRIVE_PATHS.get("ohlc_meta")
+    if u is None or not remote_path:
+        raise DriveSyncError("metadata 다운로드 설정 없음")
+    temporary = _temporary_path(path)
     try:
-        u.download(remote_path, filename, str(dest))
+        u.download(remote_path, path.name, str(temporary))
+        value = json.loads(temporary.read_text(encoding="utf-8"))
+        if not isinstance(value, dict):
+            raise ValueError("metadata must be an object")
+        if path == _PENDING_PATH and any(
+                not isinstance(tickers, list) or any(not isinstance(ticker, str) for ticker in tickers)
+                for tickers in value.values()):
+            raise ValueError("pending must map markets to ticker lists")
+        if path == _STATUS_PATH and any(not isinstance(status, dict) for status in value.values()):
+            raise ValueError("status must map markets to status objects")
+        os.replace(temporary, path)
         return True
     except FileNotFoundError:
-        logger.debug(f"[OhlcDB] Drive에 없음: {remote_path}/{filename}")
         return False
     except Exception as e:
-        logger.error(f"[OhlcDB] {filename} 다운로드 실패: {e}")
-        return False
+        raise DriveSyncError(f"{path.name} 다운로드 실패: {type(e).__name__}") from None
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _upload_metadata(path: Path, uploader=None) -> bool:
+    u = _get_uploader(uploader)
+    remote_path = config.DRIVE_PATHS.get("ohlc_meta")
+    if u is None or not remote_path or not path.exists():
+        raise DriveSyncError(f"{path.name} 업로드 준비 실패")
+    try:
+        if not isinstance(json.loads(path.read_text(encoding="utf-8")), dict):
+            raise ValueError("metadata must be an object")
+        if u.upload(str(path), remote_path) is False:
+            raise ValueError("metadata upload rejected")
+        return True
+    except Exception as e:
+        raise DriveSyncError(f"{path.name} 업로드 실패: {type(e).__name__}") from None
+
+
+def _restore_metadata(path: Path, before: bytes | None):
+    if before is None:
+        path.unlink(missing_ok=True)
+    else:
+        temporary = _temporary_path(path)
+        try:
+            temporary.write_bytes(before)
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+def publish_status(market: str, last_date: date, ticker_count: int,
+                   oldest_date: Optional[date] = None, *, upload: bool = True):
+    """Do not leave a locally advanced cursor after failed metadata publication."""
+    before = _STATUS_PATH.read_bytes() if _STATUS_PATH.exists() else None
+    try:
+        update_status(market, last_date, ticker_count, oldest_date)
+        if upload and upload_status() is False:
+            raise DriveSyncError("status 업로드 실패")
+    except Exception:
+        _restore_metadata(_STATUS_PATH, before)
+        raise
+
+
+def publish_pending(pending: dict, *, upload: bool = True):
+    before = _PENDING_PATH.read_bytes() if _PENDING_PATH.exists() else None
+    try:
+        save_pending(pending)
+        if upload and upload_pending() is False:
+            raise DriveSyncError("pending 업로드 실패")
+    except Exception:
+        _restore_metadata(_PENDING_PATH, before)
+        raise
 
 
 def download_status(uploader=None) -> bool:
-    """Drive에서 db_status.json 다운로드. 성공 True, 실패 False."""
-    u = _get_uploader(uploader)
-    if u is None:
-        return False
-
-    remote_path = config.DRIVE_PATHS.get("ohlc_meta")
-    if not remote_path:
-        logger.error("[OhlcDB] DRIVE_PATHS에 'ohlc_meta' 없음")
-        return False
-
-    _STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        u.download(remote_path, "db_status.json", str(_STATUS_PATH))
-        return True
-    except FileNotFoundError:
-        logger.debug("[OhlcDB] Drive에 db_status.json 없음 (최초 실행)")
-        return False
-    except Exception as e:
-        logger.error(f"[OhlcDB] db_status.json 다운로드 실패: {e}")
-        return False
+    """Download status; only confirmed remote absence returns False."""
+    return _download_metadata(_STATUS_PATH, uploader)
 
 
 def upload_status(uploader=None):
     """로컬 db_status.json을 Drive에 업로드."""
-    u = _get_uploader(uploader)
-    if u is None:
-        return
-
-    remote_path = config.DRIVE_PATHS.get("ohlc_meta")
-    if not remote_path:
-        logger.error("[OhlcDB] DRIVE_PATHS에 'ohlc_meta' 없음")
-        return
-
-    if not _STATUS_PATH.exists():
-        logger.warning("[OhlcDB] db_status.json 없음 → 업로드 건너뜀")
-        return
-
-    try:
-        u.upload(str(_STATUS_PATH), remote_path)
-    except Exception as e:
-        logger.error(f"[OhlcDB] db_status.json 업로드 실패: {e}")
+    return _upload_metadata(_STATUS_PATH, uploader)
 
 
 def load_pending() -> dict:
@@ -701,65 +790,29 @@ def load_pending() -> dict:
         return {}
     try:
         with open(_PENDING_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
+            result = json.load(f)
+        if not isinstance(result, dict) or any(
+                not isinstance(tickers, list) or any(not isinstance(ticker, str) for ticker in tickers)
+                for tickers in result.values()):
+            raise ValueError("pending must map markets to ticker lists")
+        return result
     except Exception as e:
-        logger.error(f"[OhlcDB] pending 로드 실패: {e}")
-        return {}
+        raise DriveSyncError(f"pending 로드 실패: {type(e).__name__}") from None
 
 
 def save_pending(pending: dict):
     """backfill_pending.json 저장."""
-    _PENDING_PATH.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        with open(_PENDING_PATH, "w", encoding="utf-8") as f:
-            json.dump(pending, f, indent=2, ensure_ascii=False)
-        logger.debug(f"[OhlcDB] pending 저장 완료: {_PENDING_PATH}")
-    except Exception as e:
-        logger.error(f"[OhlcDB] pending 저장 실패: {e}")
+    _atomic_json(_PENDING_PATH, pending)
 
 
 def download_pending(uploader=None) -> bool:
-    """Drive에서 backfill_pending.json 다운로드. 성공 True, 실패 False."""
-    u = _get_uploader(uploader)
-    if u is None:
-        return False
-
-    remote_path = config.DRIVE_PATHS.get("ohlc_meta")
-    if not remote_path:
-        logger.error("[OhlcDB] DRIVE_PATHS에 'ohlc_meta' 없음")
-        return False
-
-    _PENDING_PATH.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        u.download(remote_path, "backfill_pending.json", str(_PENDING_PATH))
-        return True
-    except FileNotFoundError:
-        logger.debug("[OhlcDB] Drive에 backfill_pending.json 없음 (최초 실행)")
-        return False
-    except Exception as e:
-        logger.error(f"[OhlcDB] backfill_pending.json 다운로드 실패: {e}")
-        return False
+    """Download pending; only confirmed remote absence returns False."""
+    return _download_metadata(_PENDING_PATH, uploader)
 
 
 def upload_pending(uploader=None):
     """로컬 backfill_pending.json을 Drive에 업로드."""
-    u = _get_uploader(uploader)
-    if u is None:
-        return
-
-    remote_path = config.DRIVE_PATHS.get("ohlc_meta")
-    if not remote_path:
-        logger.error("[OhlcDB] DRIVE_PATHS에 'ohlc_meta' 없음")
-        return
-
-    if not _PENDING_PATH.exists():
-        logger.warning("[OhlcDB] backfill_pending.json 없음 → 업로드 건너뜀")
-        return
-
-    try:
-        u.upload(str(_PENDING_PATH), remote_path)
-    except Exception as e:
-        logger.error(f"[OhlcDB] backfill_pending.json 업로드 실패: {e}")
+    return _upload_metadata(_PENDING_PATH, uploader)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

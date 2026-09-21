@@ -360,22 +360,16 @@ def run_kr_daily(args):
     today = date.today()
     current_year = today.year
 
-    # 1. Drive에서 현재 연도 parquet 다운로드 (로컬에 없을 때)
-    if not kr_db.local_path(current_year).exists():
-        logger.info(f"[KrDaily] marcap-{current_year}.parquet 로컬 없음 → Drive 다운로드 시도")
-        if args.upload_drive:
-            # 다운로드 "실패" 를 "없음" 으로 취급하면 아래 갭 백필이 1/1 부터 새 파일을 만들어
-            # Drive 의 당해 연도를 교체한다 — Marcap·Rank 과거값은 다시 받을 수 없다(D-01).
-            if kr_db.download_year_state(current_year) == "failed":
-                logger.error("[KrDaily] 기준 파일 다운로드 실패 — 덮어쓰지 않고 중단한다")
-                sys.exit(1)
-        else:
-            kr_db.download_year(current_year)
+    # 1. Existing local files do not prove that the remote baseline is current.
+    baseline_states = kr_db.ensure_year_baselines([current_year], download=args.upload_drive)
+    if "failed" in baseline_states.values():
+        logger.error("[KrDaily] 기준 파일 확인 실패 — 수집/저장/업로드 없이 중단한다")
+        sys.exit(1)
 
     # 1b. 폴백용 종목 목록 — FDR이 죽어도 쓸 수 있도록 미리 뽑아둔다.
     #     갭 backfill(_build_universe)과 당일 폴백이 둘 다 FDR에 의존하고 있어서
     #     2026-09-08에는 폴백 경로 자체가 같은 404로 막혀 있었다.
-    fallback_meta = _recent_code_meta(kr_db.load_year(current_year), today)
+    fallback_meta = _recent_code_meta(kr_db.load_year(current_year, strict=True), today)
     if fallback_meta:
         logger.info(f"[KrDaily] 폴백 유니버스 확보: {len(fallback_meta)}종목 (기존 parquet)")
 
@@ -400,7 +394,7 @@ def run_kr_daily(args):
             gap_df = kr_collector.collect_backfill(str(gap_start), str(yesterday),
                                                    fallback_meta=fallback_meta)
             if not gap_df.empty:
-                gap_updated = kr_db.append_rows(gap_df)
+                gap_updated = kr_db.append_rows(gap_df, ohlc_only=True)
                 logger.info(f"[KrDaily] 갭 보완 완료: {gap_updated}년 파일 업데이트")
             else:
                 logger.warning("[KrDaily] 갭 backfill 수집 결과 없음")
@@ -479,13 +473,7 @@ def run_kr_daily(args):
         logger.warning(f"[KrDaily] 누락 종목 보완 단계 실패 (무시하고 계속): {e}")
 
     # 4. 저장
-    updated = kr_db.append_rows(df)
-
-    last_saved = df["Date"].max()
-    last_saved_date = last_saved.date() if hasattr(last_saved, "date") else last_saved
-    existing = kr_db.load_status()
-    total_days = existing.get("trading_days_total", 0) + 1
-    kr_db.save_status(last_saved_date, total_days)
+    updated = kr_db.append_rows(df, ohlc_only=used_fallback)
 
     # 5. Drive 업로드
     if args.upload_drive and updated:
@@ -495,6 +483,12 @@ def run_kr_daily(args):
             logger.error(f"[KrDaily] Drive 업로드 실패: {failed_files}")
             sys.exit(1)
         logger.info(f"[KrDaily] Drive 업로드 완료: {updated}")
+
+    last_saved = df["Date"].max()
+    last_saved_date = last_saved.date() if hasattr(last_saved, "date") else last_saved
+    existing = kr_db.load_status()
+    total_days = existing.get("trading_days_total", 0) + 1
+    kr_db.save_status(last_saved_date, total_days)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -507,19 +501,22 @@ def run_kr_backfill(args):
     --start-date / --end-date 로 기간 지정.
     """
     from data import kr_collector, kr_db
+    import pandas as pd
 
     if not args.start_date or not args.end_date:
         logger.error("[KrBackfill] --start-date, --end-date 필수 (예: --start-date 2026-02-21)")
-        return
+        sys.exit(1)
 
     # 날짜 형식 사전 검증 (잘못된 값으로 실행 방지)
     try:
         from datetime import datetime as _dt
-        _dt.strptime(args.start_date, "%Y-%m-%d")
-        _dt.strptime(args.end_date,   "%Y-%m-%d")
+        start_date = _dt.strptime(args.start_date, "%Y-%m-%d")
+        end_date = _dt.strptime(args.end_date, "%Y-%m-%d")
+        if start_date > end_date:
+            raise ValueError("start_date must not exceed end_date")
     except ValueError as e:
         logger.error(f"[KrBackfill] 날짜 형식 오류: {e}  (YYYY-MM-DD 필요, 예: 2026-02-21)")
-        return
+        sys.exit(1)
 
     logger.info(f"[KrBackfill] 기간: {args.start_date} ~ {args.end_date}")
 
@@ -527,17 +524,30 @@ def run_kr_backfill(args):
         logger.info("[KrBackfill] dry-run: 수집 시뮬레이션 (저장 없음)")
         return
 
+    # The complete requested range must be safe before contacting a collector.
+    # Download even when a local file exists: its presence says nothing about
+    # whether the current remote baseline was obtained successfully.
+    baseline_states = kr_db.ensure_year_baselines(
+        range(start_date.year, end_date.year + 1), download=args.upload_drive,
+    )
+    if "failed" in baseline_states.values():
+        logger.error("[KrBackfill] 기준 연도 파일 확인 실패 — 수집/저장/업로드 없이 중단")
+        sys.exit(1)
+
     df = kr_collector.collect_backfill(args.start_date, args.end_date)
     if df.empty:
         logger.error("[KrBackfill] 수집 실패 → 종료")
-        return
+        sys.exit(1)
 
-    updated = kr_db.append_rows(df)
+    try:
+        collected_dates = pd.to_datetime(df["Date"], errors="raise")
+        if collected_dates.isna().any() or not collected_dates.between(start_date, end_date).all():
+            raise ValueError("collector returned dates outside the verified range")
+    except (KeyError, TypeError, ValueError) as error:
+        logger.error(f"[KrBackfill] 수집 날짜 검증 실패: {type(error).__name__}")
+        sys.exit(1)
 
-    last_date = df["Date"].max()
-    status = kr_db.load_status()
-    total_days = status.get("trading_days_total", 0)
-    kr_db.save_status(last_date.date() if hasattr(last_date, "date") else last_date, total_days)
+    updated = kr_db.append_rows(df, ohlc_only=True)
 
     if args.upload_drive and updated:
         failed_files = kr_db.upload_years(updated)
@@ -545,6 +555,12 @@ def run_kr_backfill(args):
             logger.error(f"[KrBackfill] Drive 업로드 실패: {failed_files}")
             sys.exit(1)
         logger.info(f"[KrBackfill] Drive 업로드 완료: {updated}")
+
+    # Failed publication must not be recorded as a successful backfill.
+    last_date = collected_dates.max()
+    status = kr_db.load_status()
+    total_days = status.get("trading_days_total", 0)
+    kr_db.save_status(last_date.date(), total_days)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

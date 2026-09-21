@@ -158,14 +158,15 @@ def kr_env(monkeypatch, tmp_path):
 
     monkeypatch.setattr(kr_db, "local_path", lambda year: parquet)
     monkeypatch.setattr(kr_db, "get_last_date", lambda year=None: yesterday)
-    monkeypatch.setattr(kr_db, "load_year", lambda year: prior)
+    monkeypatch.setattr(kr_db, "load_year", lambda year, **kwargs: prior)
+    monkeypatch.setattr(kr_db, "ensure_year_baselines", lambda years, **kwargs: {year: "ok" for year in years})
     monkeypatch.setattr(kr_db, "load_status", lambda: {"trading_days_total": 10})
     monkeypatch.setattr(kr_db, "save_status",
                         lambda last_date, days: setattr(rec, "status", (last_date, days)))
     monkeypatch.setattr(kr_db, "upload_years",
                         lambda years: setattr(rec, "uploaded", years))
 
-    def _append(df):
+    def _append(df, **kwargs):
         rec.appended = df
         return [2026]
 

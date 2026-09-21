@@ -911,6 +911,11 @@ def backfill_market(
     """
     from data import ohlc_db
 
+    if upload:
+        ohlc_db.download_status()
+        ohlc_db.download_pending()
+    ohlc_db.ensure_year_baselines(market, range(start_year, end_year + 1), download=upload)
+
     if tickers is None:
         tickers = load_tickers(market)
 
@@ -924,6 +929,11 @@ def backfill_market(
     symbol_overrides = build_symbol_overrides(tickers)
 
     all_dates: list[date] = []
+    original_pending = ohlc_db.load_pending()
+    intent = dict(original_pending)
+    intent[market] = sorted(set(original_pending.get(market, [])) | set(tickers))
+    ohlc_db.publish_pending(intent, upload=upload)
+    ticker_failed: set[str] = set()
 
     for year in range(start_year, end_year + 1):
         start_str = f"{year}-01-01"
@@ -938,22 +948,13 @@ def backfill_market(
         # 2026-08-20 us 2024 사고(899 → 727종목) 대응. download_year() 는
         # "Drive 에 없음"과 "다운로드 실패"를 모두 False 로 돌려줘 구분할 수
         # 없었다. 전자는 새로 쓰는 것이 정상이고 후자는 덮어쓰면 안 된다.
-        if not ohlc_db.local_path(market, year).exists():
-            state = ohlc_db.download_year_state(market, year)
-            if state == "failed":
-                logger.error(
-                    f"[OhlcCollector] {market} {year}년 기존 파일 다운로드 실패 "
-                    f"— 덮어쓰지 않고 건너뛴다"
-                )
-                continue
-
         logger.info(f"[OhlcCollector] {market.upper()} {year}년 수집 중...")
         try:
             df, failed_tickers = fetch_ohlc_range(tickers, start_str, end_str,
                                                    symbol_overrides=symbol_overrides)
         except Exception as e:
-            logger.error(f"[OhlcCollector] {market} {year}년 수집 실패: {e}")
-            continue
+            raise ohlc_db.DriveSyncError(f"{market} {year}년 수집 실패: {type(e).__name__}") from None
+        ticker_failed.update(failed_tickers)
 
         # ⚠️ 빈 결과라도 save_year를 건너뛰면 안 된다. "이번에 다시 받기로 한 종목인데
         # 해당 연도엔 데이터가 없다"는 것 자체가 정보이며, 기존에 저장된 잘못된 토큰
@@ -968,17 +969,23 @@ def backfill_market(
         if "Date" in df.columns and not df.empty:
             all_dates.extend(df["Date"].tolist())
 
-        if upload:
-            ohlc_db.upload_years(market, [year])
+        if upload and (not df.empty or ohlc_db.local_path(market, year).exists()):
+            failed_files = ohlc_db.upload_years(market, [year])
+            if failed_files:
+                raise ohlc_db.DriveSyncError(f"업로드 실패 {failed_files} — 커서/pending 유지")
+
+    if ticker_failed:
+        raise ohlc_db.DriveSyncError("백필 수집 일부 실패 — 커서/pending 유지")
 
     # 상태 업데이트
     if all_dates:
         last_dt  = max(all_dates)
         oldest_dt = min(all_dates)
         ticker_count = len(tickers)
-        ohlc_db.update_status(market, last_dt, ticker_count, oldest_dt)
-        if upload:
-            ohlc_db.upload_status()
+        ohlc_db.publish_status(market, last_dt, ticker_count, oldest_dt, upload=upload)
+
+    # A bounded full backfill cannot resolve older pending work outside its range.
+    ohlc_db.publish_pending(original_pending, upload=upload)
 
     logger.info(f"[OhlcCollector] {market.upper()} 백필 완료: {start_year}~{end_year}년")
 
@@ -1007,9 +1014,11 @@ def backfill_new_tickers(
     """
     from data import ohlc_db
 
-    ohlc_db.download_all_years(market)
-    ohlc_db.download_status()
-    ohlc_db.download_pending()
+    if upload:
+        ohlc_db.download_status()
+        ohlc_db.download_pending()
+    current_year = date.today().year
+    ohlc_db.ensure_year_baselines(market, range(start_year, current_year + 1), download=upload)
 
     known = ohlc_db.list_known_tickers(market)
     pending = set(ohlc_db.load_pending().get(market, []))
@@ -1032,7 +1041,10 @@ def backfill_new_tickers(
     # 최신 시세로 1회 판정 후 모든 연도에 재사용 (backfill_market과 동일한 이유).
     symbol_overrides = build_symbol_overrides(candidates)
 
-    current_year = date.today().year
+    intent = ohlc_db.load_pending()
+    intent[market] = sorted(pending | set(candidates))
+    # Persist retry intent before the first upload makes candidates "known".
+    ohlc_db.publish_pending(intent, upload=upload)
     all_dates: list[date] = []
     ticker_failed: set[str] = set()
 
@@ -1076,18 +1088,11 @@ def backfill_new_tickers(
             all_dates.extend(df["Date"].tolist())
 
         if upload:
-            ohlc_db.upload_years(market, [year])
-
-    all_pending = ohlc_db.load_pending()
-    all_pending[market] = sorted(ticker_failed)
-    ohlc_db.save_pending(all_pending)
-    if upload:
-        ohlc_db.upload_pending()
+            failed_files = ohlc_db.upload_years(market, [year])
+            if failed_files:
+                raise ohlc_db.DriveSyncError(f"업로드 실패 {failed_files} — pending 유지")
     if ticker_failed:
-        logger.info(
-            f"[NewTickerBackfill] {market.upper()} 다음 실행에 재시도할 "
-            f"미완료 종목 {len(ticker_failed)}개: {sorted(ticker_failed)}"
-        )
+        raise ohlc_db.DriveSyncError("신규 종목 백필 일부 실패 — pending 유지")
 
     if all_dates:
         status = ohlc_db.load_status()
@@ -1119,9 +1124,11 @@ def backfill_new_tickers(
             except ValueError:
                 pass
 
-        ohlc_db.update_status(market, last_dt, len(universe), oldest_dt)
-        if upload:
-            ohlc_db.upload_status()
+        ohlc_db.publish_status(market, last_dt, len(universe), oldest_dt, upload=upload)
+
+    all_pending = ohlc_db.load_pending()
+    all_pending[market] = sorted(pending - set(candidates))
+    ohlc_db.publish_pending(all_pending, upload=upload)
 
     logger.info(f"[NewTickerBackfill] {market.upper()} 백필 완료: {candidates}")
     return candidates
@@ -1173,7 +1180,8 @@ def update_market(
         tickers = load_tickers(market)
 
     # 1. Drive에서 status 다운로드
-    ohlc_db.download_status()
+    if upload:
+        ohlc_db.download_status()
 
     # 2. last_date 파싱
     status = ohlc_db.load_status()
@@ -1210,17 +1218,9 @@ def update_market(
         f"{start_str} ~ {end_str} / {len(tickers)}종목"
     )
 
-    # 5. 현재 연도 parquet이 로컬에 없으면 Drive에서 다운로드
-    current_year = end_date.year
-    if not ohlc_db.local_path(market, current_year).exists():
-        logger.info(f"[OhlcCollector] {market}_{current_year}.parquet 로컬 없음 → Drive 다운로드 시도")
-        # "Drive 에 없음"(absent)과 "다운로드 실패"(failed)는 다르다. 실패한 채로 append 하면 로컬에는
-        # 증분 며칠 치만 있어 그 파일이 당해 연도 전체를 교체한다(D-01). 백필 경로에만 있던 가드를 여기에도 둔다.
-        if upload and ohlc_db.download_year_state(market, current_year) == "failed":
-            raise ohlc_db.DriveSyncError(
-                f"{market}_{current_year}.parquet 다운로드 실패 — 덮어쓰지 않고 중단한다")
-        elif not upload:
-            ohlc_db.download_year(market, current_year)
+    # yfinance's end is exclusive; crypto lookback may cross the year boundary.
+    expected_years = set(range(start_date.year, (end_date - timedelta(days=1)).year + 1))
+    ohlc_db.ensure_year_baselines(market, expected_years, download=upload)
 
     # 6. 수집
     try:
@@ -1241,6 +1241,8 @@ def update_market(
         new_df = _enrich_us_marketcap(new_df)
 
     # 7. append + 업로드
+    actual_years = set(pd.to_datetime(new_df["Date"]).dt.year)
+    ohlc_db.ensure_year_baselines(market, actual_years - expected_years, download=upload)
     updated_years = ohlc_db.append_rows(new_df, market)
     if upload and updated_years:
         failed_files = ohlc_db.upload_years(market, updated_years)
@@ -1258,9 +1260,7 @@ def update_market(
                 actual_oldest = datetime.strptime(actual_oldest_str, "%Y-%m-%d").date()
             except ValueError:
                 pass
-        ohlc_db.update_status(market, actual_last, len(tickers), actual_oldest)
-        if upload:
-            ohlc_db.upload_status()
+        ohlc_db.publish_status(market, actual_last, len(tickers), actual_oldest, upload=upload)
 
     logger.info(f"[OhlcCollector] {market.upper()} 증분 업데이트 완료")
 

@@ -5,6 +5,7 @@ D-01  Drive 다운로드 **실패**를 "파일 없음" 으로 취급하면 당�
 D-02  업로드가 실패해도 커서(db_status.json)가 전진하면 그날은 다시 수집되지 않는 영구 구멍이 된다.
 """
 from datetime import date, timedelta
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -23,6 +24,8 @@ def _new_rows():
 def harness(tmp_path, monkeypatch):
     calls = {"append": 0, "upload_years": 0, "update_status": 0, "upload_status": 0}
     monkeypatch.setattr(ohlc_db, "_LOCAL_ROOT", tmp_path / "ohlc_db")
+    monkeypatch.setattr(ohlc_db, "_STATUS_PATH", tmp_path / "db_status.json")
+    monkeypatch.setattr(ohlc_db, "_PENDING_PATH", tmp_path / "backfill_pending.json")
     monkeypatch.setattr(ohlc_db, "download_status", lambda *a, **k: None)
     monkeypatch.setattr(ohlc_db, "load_status",
                         lambda: {"us": {"last_updated": str(date.today() - timedelta(days=3))}})
@@ -77,11 +80,13 @@ def test_upload_years_reports_which_files_failed(tmp_path, monkeypatch):
     for year in (2025, 2026):
         path = ohlc_db.local_path("us", year)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(b"x")
+        data = _new_rows()
+        data["Date"] = date(year, 1, 2)
+        data.to_parquet(path, index=False)
 
     class Uploader:
         def upload(self, local, remote):
-            if "2026" in local:
+            if "2026" in Path(local).name:
                 raise OSError("503")
     monkeypatch.setitem(ohlc_db.config.DRIVE_PATHS, "ohlc_us", "data/ohlc/us")
     assert ohlc_db.upload_years("us", [2025, 2026], uploader=Uploader()) == ["us_2026.parquet"]
@@ -94,6 +99,12 @@ import main as kr_main
 from data import kr_db
 
 
+def _kr_rows(year=2026):
+    return pd.DataFrame({"Code": ["000001"], "Date": [date(year, 1, 2)],
+                         "Open": [100], "High": [101], "Low": [99], "Close": [100],
+                         "Volume": [1000], "Marcap": [100000], "Rank": [1], "Stocks": [1000]})
+
+
 class _Uploader:
     def __init__(self, download=None, upload=None):
         self._download, self._upload = download, upload
@@ -101,6 +112,8 @@ class _Uploader:
     def download(self, remote, name, dest):
         if isinstance(self._download, Exception):
             raise self._download
+        year = int(name.removeprefix("marcap-").removesuffix(".parquet"))
+        _kr_rows(year).to_parquet(dest, index=False)
 
     def upload(self, local, remote):
         if isinstance(self._upload, Exception):
@@ -121,7 +134,7 @@ def test_kr_download_distinguishes_absent_from_failed(kr_paths, outcome, expecte
 
 
 def test_kr_upload_reports_failed_files(kr_paths):
-    (kr_paths / "marcap-2026.parquet").write_bytes(b"x")
+    _kr_rows().to_parquet(kr_paths / "marcap-2026.parquet", index=False)
     assert kr_db.upload_years([2026], uploader=_Uploader(upload=OSError("503"))) == ["marcap-2026.parquet"]
     assert kr_db.upload_years([2026], uploader=_Uploader()) == []
 

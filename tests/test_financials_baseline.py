@@ -108,13 +108,17 @@ def test_collector_us_skips_baseline_without_upload(monkeypatch):
 
 
 def test_collector_crypto_calls_baseline(monkeypatch):
+    import requests
     from data import financials_collector, financials_db
     calls = []
     monkeypatch.setattr(financials_db, "ensure_drive_baseline",
                         lambda market, kinds=("financials", "ratios"), uploader=None:
                         calls.append((market, tuple(kinds))))
-    # CMC 실네트워크 차단 — 즉시 connection refused 로 실패해 수집 없이 빠져나온다
-    monkeypatch.setattr(financials_collector, "_CMC_URL", "http://127.0.0.1:9/none")
+    # Simulate failure without opening even a loopback connection.
+    def unavailable(*args, **kwargs):
+        assert calls == [("crypto", ("ratios",))]
+        raise requests.ConnectionError("synthetic CMC outage")
+    monkeypatch.setattr(requests.Session, "get", unavailable)
     financials_collector.collect_crypto_ratios(tickers=[], upload=True)
     assert calls == [("crypto", ("ratios",))]
 

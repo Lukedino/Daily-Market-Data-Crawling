@@ -115,8 +115,8 @@ class TestShrinkGuard:
     def test_first_write_is_not_blocked(self, db):
         """기존 파일이 없으면 비교 대상이 없으므로 통과한다."""
         db.save_year(_universe([f"T{i:04d}" for i in range(50)], DATES),
-                     "us", 2099)
-        assert db.load_year("us", 2099)["Ticker"].nunique() == 50
+                     "us", 2024)
+        assert db.load_year("us", 2024)["Ticker"].nunique() == 50
 
     def test_replace_tickers_path_is_not_broken(self, db):
         """
@@ -159,6 +159,13 @@ class TestBackfillRespectsDownloadFailure:
     def _patch_common(self, monkeypatch, tmp_path, saved):
         from data import ohlc_collector, ohlc_db
         monkeypatch.setattr(ohlc_db, "_LOCAL_ROOT", tmp_path / "ohlc_db")
+        monkeypatch.setattr(ohlc_db, "_STATUS_PATH", tmp_path / "db_status.json")
+        monkeypatch.setattr(ohlc_db, "_PENDING_PATH", tmp_path / "backfill_pending.json")
+        monkeypatch.setattr(ohlc_db, "download_status", lambda *a, **k: False)
+        monkeypatch.setattr(ohlc_db, "download_pending", lambda *a, **k: False)
+        monkeypatch.setattr(ohlc_db, "upload_years", lambda *a, **k: [])
+        monkeypatch.setattr(ohlc_db, "upload_pending", lambda *a, **k: True)
+        monkeypatch.setattr(ohlc_db, "upload_status", lambda *a, **k: True)
         monkeypatch.setattr(ohlc_db, "save_year",
                             lambda *a, **k: saved.append(a))
         monkeypatch.setattr(ohlc_db, "update_status", lambda *a, **k: None)
@@ -175,7 +182,8 @@ class TestBackfillRespectsDownloadFailure:
         saved = []
         oc, db = self._patch_common(monkeypatch, tmp_path, saved)
         monkeypatch.setattr(db, "download_year_state", lambda *a, **k: "failed")
-        oc.backfill_market("us", 2024, 2024, upload=False)
+        with pytest.raises(db.DriveSyncError):
+            oc.backfill_market("us", 2024, 2024, upload=True)
         assert saved == [], "Drive 다운로드 실패 시 저장하면 안 된다"
 
     def test_backfill_proceeds_when_remote_is_absent(self, monkeypatch, tmp_path):
@@ -183,14 +191,14 @@ class TestBackfillRespectsDownloadFailure:
         saved = []
         oc, db = self._patch_common(monkeypatch, tmp_path, saved)
         monkeypatch.setattr(db, "download_year_state", lambda *a, **k: "absent")
-        oc.backfill_market("us", 2024, 2024, upload=False)
+        oc.backfill_market("us", 2024, 2024, upload=True)
         assert len(saved) == 1
 
     def test_backfill_proceeds_when_download_succeeds(self, monkeypatch, tmp_path):
         saved = []
         oc, db = self._patch_common(monkeypatch, tmp_path, saved)
         monkeypatch.setattr(db, "download_year_state", lambda *a, **k: "ok")
-        oc.backfill_market("us", 2024, 2024, upload=False)
+        oc.backfill_market("us", 2024, 2024, upload=True)
         assert len(saved) == 1
 
 
@@ -217,8 +225,8 @@ class TestDownloadYearState:
 
     def test_returns_ok_on_success(self, db, monkeypatch):
         class U:
-            def download(self, *a, **k):
-                return None
+            def download(self, remote, filename, destination):
+                _rows("AAA", DATES).to_parquet(destination, index=False)
         monkeypatch.setattr(db, "_get_uploader", lambda u=None: U())
         assert db.download_year_state("us", 2024) == "ok"
 
@@ -250,23 +258,23 @@ class TestCoverageContinuityGate:
 
     def test_us_2024_intra_file_drop_is_blocked(self, db):
         """실제 사고 형태 — 파일 안에서 899 -> 704."""
-        d1 = ["2023-12-27", "2023-12-28", "2023-12-29"]
-        d2 = ["2024-01-02", "2024-01-03"]
+        d1 = ["2024-01-02", "2024-01-03", "2024-01-04"]
+        d2 = ["2024-01-05", "2024-01-06"]
         keep = [f"K{i:04d}" for i in range(704)]
         gone = [f"G{i:04d}" for i in range(195)]
         df = pd.concat([self._panel(d1, keep + gone), self._panel(d2, keep)],
                        ignore_index=True)
         with pytest.raises(db.CoverageGapError) as e:
             db.save_year(df, "us", 2024)
-        assert "2024-01-02" in str(e.value)
+        assert "2024-01-05" in str(e.value)
 
     def test_shrink_guard_would_have_passed_this(self, db):
         """
         같은 프레임이 축소 가드는 통과한다는 것을 명시적으로 고정한다.
         두 검사가 서로를 대체하지 않는 이유다.
         """
-        d1 = ["2023-12-27", "2023-12-28", "2023-12-29"]
-        d2 = ["2024-01-02", "2024-01-03"]
+        d1 = ["2024-01-02", "2024-01-03", "2024-01-04"]
+        d2 = ["2024-01-05", "2024-01-06"]
         keep = [f"K{i:04d}" for i in range(704)]
         gone = [f"G{i:04d}" for i in range(195)]
         df = pd.concat([self._panel(d1, keep + gone), self._panel(d2, keep)],

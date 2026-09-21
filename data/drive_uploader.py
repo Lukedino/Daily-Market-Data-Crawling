@@ -20,6 +20,7 @@ data/drive_uploader.py — Google Drive 업로드/다운로드
 
 import logging
 import os
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -229,9 +230,13 @@ class DriveUploader:
         import io
         from googleapiclient.http import MediaIoBaseDownload
 
-        service   = self._get_service()
-        folder_id = self._get_or_create_folder(remote_subfolder)
-        file_id   = self._find_file(folder_id, filename)
+        try:
+            service = self._get_service()
+            folder_id = self._get_or_create_folder(remote_subfolder)
+            file_id = self._find_file(folder_id, filename)
+        except FileNotFoundError:
+            # Missing local credentials must not masquerade as absent remote data.
+            raise RuntimeError("Drive authentication/setup unavailable") from None
 
         if file_id is None:
             raise FileNotFoundError(
@@ -248,8 +253,20 @@ class DriveUploader:
         while not done:
             _, done = downloader.next_chunk()
 
-        with open(local_path, "wb") as f:
-            f.write(buf.getvalue())
+        destination = Path(local_path)
+        fd, temporary = tempfile.mkstemp(prefix=destination.name + ".", suffix=".tmp", dir=destination.parent)
+        os.close(fd)
+        try:
+            Path(temporary).write_bytes(buf.getvalue())
+            if filename.endswith(".parquet"):
+                import pyarrow.parquet as pq
+                pq.read_table(temporary)
+            elif filename.endswith(".json"):
+                import json
+                json.loads(Path(temporary).read_text(encoding="utf-8"))
+            os.replace(temporary, destination)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
 
         logger.info(f"[Drive] 다운로드 완료: {remote_subfolder}/{filename} → {local_path}")
 
