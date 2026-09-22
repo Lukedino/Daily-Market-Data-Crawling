@@ -49,22 +49,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-# ── 로깅 설정 ─────────────────────────────────────────────────────────────────
-_stdout_handler = logging.StreamHandler(sys.stdout)
-_stdout_handler.stream.reconfigure(encoding="utf-8", errors="replace")
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
-    handlers=[
-        _stdout_handler,
-        logging.FileHandler("collection.log", encoding="utf-8"),
-    ],
-)
-# pykrx 내부 노이즈 억제
-logging.getLogger("pykrx").setLevel(logging.CRITICAL)
-logging.getLogger("urllib3").setLevel(logging.WARNING)
-logging.getLogger("googleapiclient").setLevel(logging.WARNING)
-logging.getLogger("google").setLevel(logging.WARNING)
+from data.execution_safety import writer_lock, configure_logging, cli_entry
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +65,10 @@ def run_daily(args):
     - 이번 달 일별 주가 수집
     - Drive 업로드 (--upload-drive 시)
     """
+    if args.dry_run:
+        logger.info("dry_run")
+        return
+
     from data import collector, storage, progress
 
     today    = datetime.today()
@@ -140,7 +129,11 @@ def run_bootstrap(args):
       --years-range N   → 최근 N년치 (current-N ~ current-1)
       --year-start YYYY → YYYY ~ current-1 전체 (max 모드)
     """
-    from data import historical, progress
+    if args.dry_run:
+        logger.info("dry_run")
+        return
+
+    from data import historical, progress, storage
 
     current_year = datetime.today().year
     skip = not args.force
@@ -228,6 +221,10 @@ def run_ohlc_backfill(args):
     US/Crypto OHLC 초기 적재.
     --market all|us|crypto, --start-year, --end-year 옵션 사용.
     """
+    if args.dry_run:
+        logger.info("dry_run")
+        return
+
     from data import ohlc_collector
     end_year = args.end_year or (datetime.today().year - 1)
     markets = ["us", "crypto"] if args.market == "all" else [args.market]
@@ -251,6 +248,10 @@ def run_ohlc_update(args):
     마지막 업데이트 이후 누락된 데이터를 수집.
     신규 종목이 유니버스에 추가된 경우, 증분 업데이트 전에 과거 이력을 먼저 백필한다.
     """
+    if args.dry_run:
+        logger.info("dry_run")
+        return
+
     from data import ohlc_collector
     markets = ["us", "crypto"] if args.market == "all" else [args.market]
     for market in markets:
@@ -275,6 +276,10 @@ def run_ohlc_new_backfill(args):
     US/Crypto 유니버스에 새로 추가된 종목만 골라 과거 이력을 백필한다.
     daily(ohlc-update)에서도 자동으로 실행되지만, 즉시 반영하고 싶을 때 수동으로 실행 가능.
     """
+    if args.dry_run:
+        logger.info("dry_run")
+        return
+
     from data import ohlc_collector
     markets = ["us", "crypto"] if args.market == "all" else [args.market]
     for market in markets:
@@ -342,13 +347,17 @@ def run_kr_daily(args):
     KR daily 수집 플로우:
     1. Drive에서 현재 연도 parquet + status 다운로드
     2. last_date 확인 → 어제까지 갭이 있으면 yfinance backfill 자동 수행
-    3. 오늘 FDR StockListing 스냅샷 수집 (실패 시 yfinance 전량 폴백)
+    3. 같은 원천 일자의 FDR 스냅샷 수집 (실제 원천 오류는 즉시 보류)
     4. 저장 + Drive 업로드
 
     ⚠️ 3번이 끝내 0건이면 sys.exit(1)로 끝낸다. 2026-09-08에는 조용히 return해서
        GHA가 success로 끝났고, 그래서 데이터 구멍이 하류(KIS EOD 분석)의 알림으로만
        드러났다. 워크플로우에 실패 알림을 붙여도 실패로 끝나지 않으면 뜨지 않는다.
     """
+    if args.dry_run:
+        logger.info("dry_run")
+        return
+
     from datetime import date, timedelta
     from data import kr_collector, kr_db
     import pandas as pd
@@ -394,6 +403,7 @@ def run_kr_daily(args):
             gap_df = kr_collector.collect_backfill(str(gap_start), str(yesterday),
                                                    fallback_meta=fallback_meta)
             if not gap_df.empty:
+                kr_collector.validate_price_basis(gap_df)
                 gap_updated = kr_db.append_rows(gap_df, ohlc_only=True)
                 logger.info(f"[KrDaily] 갭 보완 완료: {gap_updated}년 파일 업데이트")
             else:
@@ -411,7 +421,7 @@ def run_kr_daily(args):
     if df.empty:
         # FDR StockListing은 KRX가 아니라 제3자 GitHub 캐시 저장소의 날짜별
         # CSV를 읽는다. 그쪽이 그날치를 안 올리면 세 시장 전부 404다(2026-09-08).
-        # 시세 자체는 yfinance에 있으므로 하루를 통째로 버릴 이유가 없다.
+        # 빈 결과 호환경로의 후보만 받는다. 아래 가격 기준 검증 전에는 저장하지 않는다.
         logger.warning("[KrDaily] FDR 스냅샷 0건 → yfinance 전량 폴백 시도")
         if fallback_meta:
             df = kr_collector.collect_daily_fallback(fallback_meta, today)
@@ -464,15 +474,19 @@ def run_kr_daily(args):
                 }
                 supp = kr_collector.collect_missing_today(missing_codes, code_meta, today)
                 if not supp.empty:
+                    kr_collector.validate_price_basis(supp)
                     df = pd.concat([df, supp], ignore_index=True)
                     df = df.drop_duplicates(subset=["Code", "Date"], keep="first")
                     logger.info(
                         f"[KrDaily] 보완 merge 완료: {len(supp)}종목 추가 (총 {len(df)}종목)"
                     )
+    except kr_collector.KrCollectionError:
+        raise
     except Exception as e:
         logger.warning(f"[KrDaily] 누락 종목 보완 단계 실패 (무시하고 계속): {e}")
 
     # 4. 저장
+    kr_collector.validate_price_basis(df)
     updated = kr_db.append_rows(df, ohlc_only=used_fallback)
 
     # 5. Drive 업로드
@@ -500,6 +514,10 @@ def run_kr_backfill(args):
     yfinance로 과거 누락 구간 KR OHLCV 백필.
     --start-date / --end-date 로 기간 지정.
     """
+    if args.dry_run:
+        logger.info("dry_run")
+        return
+
     from data import kr_collector, kr_db
     import pandas as pd
 
@@ -547,6 +565,7 @@ def run_kr_backfill(args):
         logger.error(f"[KrBackfill] 수집 날짜 검증 실패: {type(error).__name__}")
         sys.exit(1)
 
+    kr_collector.validate_price_basis(df)
     updated = kr_db.append_rows(df, ohlc_only=True)
 
     if args.upload_drive and updated:
@@ -574,8 +593,16 @@ def run_sector_meta(args):
     - Crypto: 유니버스 전체 → Market="Crypto", Sector/Industry=""
     결과: {market}_sector_meta.parquet → Drive ohlc_{market} 폴더에 업로드
     """
+    if args.dry_run:
+        logger.info("dry_run")
+        return
+
     from data import ohlc_collector, ohlc_db
     markets = ["us", "crypto"] if args.market == "all" else [args.market]
+    for market in markets:
+        ohlc_db.load_sector_meta(market)
+        if args.upload_drive:
+            ohlc_db.download_sector_meta(market)
     for market in markets:
         logger.info(f"[SectorMeta] {market.upper()} 메타데이터 수집 시작")
         if args.dry_run:
@@ -588,7 +615,7 @@ def run_sector_meta(args):
                 ohlc_db.upload_sector_meta(market)
             logger.info(f"[SectorMeta] {market.upper()} 완료: {len(df)}종목")
         else:
-            logger.warning(f"[SectorMeta] {market.upper()} 결과 없음")
+            raise ohlc_db.DriveSyncError("sector_collection_empty")
 
 
 def run_financials_update(args):
@@ -596,6 +623,10 @@ def run_financials_update(args):
     US financials + ratios, Crypto ratios, KR financials(DART) 수집 및 Drive 업로드.
     --market us|crypto|kr|all 옵션 지원.
     """
+    if args.dry_run:
+        logger.info("dry_run")
+        return
+
     from data import financials_collector
     markets = ["us", "crypto", "kr"] if args.market == "all" else [args.market]
     for market in markets:
@@ -626,21 +657,8 @@ def run_financials_update(args):
 
 def _upload_all():
     """로컬 data/ 전체를 Drive에 동기화."""
-    import config
-    if not config.GDRIVE_FOLDER_ID:
-        logger.warning("[Upload] GDRIVE_FOLDER_ID 미설정 → 업로드 건너뜀")
-        return
-    has_token = config.GDRIVE_TOKEN_PATH and Path(config.GDRIVE_TOKEN_PATH).exists()
-    has_sa    = Path(config.GDRIVE_CREDS_PATH).exists()
-    if not has_token and not has_sa:
-        logger.warning("[Upload] Drive 자격증명 없음 → 건너뜀")
-        return
-
-    try:
-        from data.drive_uploader import DriveUploader
-        DriveUploader().sync_all_local()
-    except Exception as e:
-        logger.error(f"[Upload] Drive 동기화 실패: {e}")
+    from data.drive_uploader import DriveUploader
+    DriveUploader().sync_all_local()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -746,44 +764,42 @@ def main():
 
     args = parser.parse_args()
 
-    # 현황 출력 모드
-    if args.status:
-        from data import progress, storage
-        progress.print_summary()
-        storage.print_local_summary()
-        return
+    if args.dry_run:
+        logger.info("dry_run")
+        return 0
+    with writer_lock():
+        # 현황 출력 모드
+        if args.status:
+            from data import progress, storage
+            progress.print_summary()
+            storage.print_local_summary()
+            return
 
-    logger.info("=" * 60)
-    logger.info(f"  Quant-Korea-Data 수집기 시작")
-    logger.info(f"  모드: {args.mode} | DryRun: {args.dry_run}")
-    logger.info("=" * 60)
+        logger.info("=" * 60)
+        logger.info(f"  Quant-Korea-Data 수집기 시작")
+        logger.info(f"  모드: {args.mode} | DryRun: {args.dry_run}")
+        logger.info("=" * 60)
 
-    if args.mode == "daily":
-        run_daily(args)
-    elif args.mode == "bootstrap":
-        run_bootstrap(args)
-    elif args.mode == "ohlc-backfill":
-        run_ohlc_backfill(args)
-    elif args.mode == "ohlc-update":
-        run_ohlc_update(args)
-    elif args.mode == "ohlc-new-backfill":
-        run_ohlc_new_backfill(args)
-    elif args.mode == "financials-update":
-        run_financials_update(args)
-    elif args.mode == "kr-daily":
-        run_kr_daily(args)
-    elif args.mode == "kr-backfill":
-        run_kr_backfill(args)
-    elif args.mode == "sector-meta":
-        run_sector_meta(args)
+        if args.mode == "daily":
+            run_daily(args)
+        elif args.mode == "bootstrap":
+            run_bootstrap(args)
+        elif args.mode == "ohlc-backfill":
+            run_ohlc_backfill(args)
+        elif args.mode == "ohlc-update":
+            run_ohlc_update(args)
+        elif args.mode == "ohlc-new-backfill":
+            run_ohlc_new_backfill(args)
+        elif args.mode == "financials-update":
+            run_financials_update(args)
+        elif args.mode == "kr-daily":
+            run_kr_daily(args)
+        elif args.mode == "kr-backfill":
+            run_kr_backfill(args)
+        elif args.mode == "sector-meta":
+            run_sector_meta(args)
 
 
 if __name__ == "__main__":
-    # 로컬 임포트 경로 보장
-    import os
-    sys.path.insert(0, os.path.dirname(__file__))
-
-    # storage를 main에서 직접 참조하기 위한 임포트
-    from data import storage
-
-    main()
+    configure_logging("collection.log")
+    raise SystemExit(cli_entry(main))

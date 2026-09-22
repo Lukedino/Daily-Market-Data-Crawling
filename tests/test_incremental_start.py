@@ -8,7 +8,7 @@
 
 → 크립토 증분 조회를 `last_date - 6` 부터로 넓힌다. 200종목 × 7일이라 비용은
 미미하고, 야후가 늦게 낸 봉·일시 결손은 다음 실행이 (Ticker, Date) keep="last"
-병합으로 자연 치유한다. US 는 장마감 후 크롤이라 기존(+1일) 유지.
+병합으로 자연 치유한다. US도 마지막 저장 세션을 다시 받아 조정 기준을 비교한다.
 """
 import sys
 from datetime import date
@@ -32,5 +32,5 @@ def test_crypto_lookback_covers_the_2026_08_31_hole():
     assert start <= date(2026, 8, 31) < date(2026, 9, 3)
 
 
-def test_us_start_is_next_day():
-    assert oc.incremental_start_date("us", date(2026, 9, 3)) == date(2026, 9, 4)
+def test_us_start_includes_last_saved_session_for_basis_check():
+    assert oc.incremental_start_date("us", date(2026, 9, 3)) == date(2026, 9, 3)

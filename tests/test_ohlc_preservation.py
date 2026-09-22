@@ -113,18 +113,21 @@ def test_invalid_drive_parquet_preserves_valid_local(tmp_path, monkeypatch):
     uploader = DriveUploader(root_folder_id="synthetic-root")
     service = SimpleNamespace(files=lambda: SimpleNamespace(get_media=lambda **k: object()))
     monkeypatch.setattr(uploader, "_get_service", lambda: service)
-    monkeypatch.setattr(uploader, "_get_or_create_folder", lambda *a: "synthetic-folder")
+    monkeypatch.setattr(uploader, "_lookup_folder", lambda *a: "synthetic-folder")
     monkeypatch.setattr(uploader, "_find_file", lambda *a: "synthetic-file")
     class Downloader:
-        def __init__(self, target, request):
+        calls = 0
+        def __init__(self, target, request, **kwargs):
             self.target = target
-        def next_chunk(self):
+        def next_chunk(self, **kwargs):
+            Downloader.calls += 1
             self.target.write(b"corrupt parquet")
             return None, True
     monkeypatch.setattr(googleapiclient.http, "MediaIoBaseDownload", Downloader)
     with pytest.raises(Exception):
         uploader.download("us", path.name, str(path))
     assert path.read_bytes() == before
+    assert Downloader.calls == 1
 
 
 @pytest.mark.parametrize("kind", ["full", "new", "incremental"])

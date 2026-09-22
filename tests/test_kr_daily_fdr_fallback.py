@@ -14,8 +14,9 @@ FDR StockListing이 죽었을 때의 KR 일별 수집 — yfinance 전량 폴백
      (_build_universe) 같은 404에 걸린다 — "다음날 자동으로 메워진다"는
      자가 치유 자체가 성립하지 않았다.
 
-종목 목록은 이미 받아둔 parquet에 다 들어있다. FDR이 죽으면 거기서 유니버스를
-만들어 yfinance로 당일 스냅샷을 받는다.
+종목 목록을 만드는 이전 폴백 계약은 유지한다. Q4에서는 원천 날짜나 가격 기준을
+확인하지 못한 Yahoo 후보를 저장하지 않는다. 실제 typed FDR 오류는 폴백 호출 전
+실패하며, 빈 결과 대역이 만든 폴백 후보도 validate_price_basis에서 보류한다.
 """
 import sys
 from datetime import date, timedelta
@@ -138,6 +139,8 @@ class _Recorder:
         self.appended = None
         self.uploaded = None
         self.status = None
+        self.path = None
+        self.before = None
 
 
 @pytest.fixture
@@ -146,15 +149,15 @@ def kr_env(monkeypatch, tmp_path):
     rec = _Recorder()
     yesterday = date.today() - timedelta(days=1)
 
-    parquet = tmp_path / "marcap.parquet"
-    parquet.write_bytes(b"")            # 존재하기만 하면 Drive 다운로드를 건너뛴다
-
     prior = pd.DataFrame({
         "Code": ["005930", "247540"],
         "Name": ["삼성전자", "에코프로비엠"],
         "Market": ["KOSPI", "KOSDAQ"],
         "Date": [pd.Timestamp(yesterday)] * 2,
     })
+    parquet = tmp_path / "marcap.parquet"
+    prior.to_parquet(parquet, index=False)
+    rec.path, rec.before = parquet, parquet.read_bytes()
 
     monkeypatch.setattr(kr_db, "local_path", lambda year: parquet)
     monkeypatch.setattr(kr_db, "get_last_date", lambda year=None: yesterday)
@@ -176,14 +179,27 @@ def kr_env(monkeypatch, tmp_path):
     return rec
 
 
-def _today_row():
-    return pd.DataFrame({
+def _today_row(source="yfinance"):
+    frame = pd.DataFrame({
         "Code": ["005930"],
         "Name": ["삼성전자"],
         "Market": ["KOSPI"],
         "Close": [269500.0],
         "Date": [pd.Timestamp(date.today())],
     })
+    if source == "fdr":
+        frame.attrs["krx_snapshot"] = {"version": 1, "provider": "fdr_krx_cache",
+                                       "source_date": date.today().isoformat()}
+    else:
+        frame.attrs["kr_price_basis"] = {"provider": "yfinance", "auto_adjust": True}
+    return frame
+
+
+def _assert_hold(rec):
+    assert rec.appended is None
+    assert rec.uploaded is None
+    assert rec.status is None
+    assert rec.path.read_bytes() == rec.before
 
 
 _ARGS = SimpleNamespace(dry_run=False, upload_drive=True)
@@ -199,20 +215,18 @@ def test_exits_nonzero_when_fdr_and_yfinance_both_yield_nothing(kr_env, monkeypa
         kr_main.run_kr_daily(_ARGS)
 
     assert exc.value.code == 1
-    assert kr_env.appended is None, "수집이 0건인데 저장하면 안 된다"
+    _assert_hold(kr_env)
 
 
-def test_falls_back_to_yfinance_and_saves_when_fdr_is_dead(kr_env, monkeypatch):
-    """2026-09-08 재현 — FDR이 404여도 그날 시세를 잃지 않아야 한다."""
+def test_empty_fdr_yahoo_candidate_holds_without_price_basis(kr_env, monkeypatch):
+    """빈 FDR 대역의 Yahoo 후보는 받아도 가격 기준 증명 전에는 저장하지 않는다."""
     monkeypatch.setattr(kr_collector, "collect_daily", lambda: pd.DataFrame())
     monkeypatch.setattr(kr_collector, "collect_daily_fallback",
                         lambda code_meta, target_date=None: _today_row())
 
-    kr_main.run_kr_daily(_ARGS)
-
-    assert kr_env.appended is not None
-    assert list(kr_env.appended["Code"]) == ["005930"]
-    assert kr_env.uploaded == [2026]
+    with pytest.raises(kr_collector.KrCollectionError, match="price_basis_unverified"):
+        kr_main.run_kr_daily(_ARGS)
+    _assert_hold(kr_env)
 
 
 def test_fallback_receives_universe_built_from_existing_parquet(kr_env, monkeypatch):
@@ -226,10 +240,12 @@ def test_fallback_receives_universe_built_from_existing_parquet(kr_env, monkeypa
 
     monkeypatch.setattr(kr_collector, "collect_daily_fallback", _fallback)
 
-    kr_main.run_kr_daily(_ARGS)
+    with pytest.raises(kr_collector.KrCollectionError, match="price_basis_unverified"):
+        kr_main.run_kr_daily(_ARGS)
 
     assert sorted(seen["meta"]) == ["005930", "247540"]
     assert seen["meta"]["247540"]["Market"] == "KOSDAQ"
+    _assert_hold(kr_env)
 
 
 def test_normal_fdr_path_does_not_call_fallback(kr_env, monkeypatch):
@@ -237,12 +253,32 @@ def test_normal_fdr_path_does_not_call_fallback(kr_env, monkeypatch):
     def _boom(*a, **k):
         raise AssertionError("FDR이 정상인데 폴백을 타면 안 된다")
 
-    monkeypatch.setattr(kr_collector, "collect_daily", _today_row)
+    monkeypatch.setattr(kr_collector, "collect_daily", lambda: _today_row("fdr"))
     monkeypatch.setattr(kr_collector, "collect_daily_fallback", _boom)
 
     kr_main.run_kr_daily(_ARGS)
 
     assert kr_env.appended is not None
+
+
+def test_actual_fdr_typed_failure_stops_before_yahoo_fallback(kr_env, monkeypatch):
+    """실제 collect_daily의 원천 실패는 빈 DF가 아니라 typed raise이다."""
+    def source_failed():
+        raise kr_collector.KrCollectionError("kr_source_failed")
+    monkeypatch.setattr(kr_collector, "read_krx_snapshot", source_failed)
+    monkeypatch.setattr(kr_collector, "collect_daily_fallback",
+                        lambda *a, **kw: pytest.fail("typed FDR failure must not call Yahoo"))
+    with pytest.raises(kr_collector.KrCollectionError, match="kr_source_failed"):
+        kr_main.run_kr_daily(_ARGS)
+    _assert_hold(kr_env)
+
+
+def test_yahoo_supplement_holds_before_append(kr_env, monkeypatch):
+    monkeypatch.setattr(kr_collector, "collect_daily", lambda: _today_row("fdr"))
+    monkeypatch.setattr(kr_collector, "collect_missing_today", lambda *a, **kw: _today_row())
+    with pytest.raises(kr_collector.KrCollectionError, match="price_basis_unverified"):
+        kr_main.run_kr_daily(_ARGS)
+    _assert_hold(kr_env)
 
 
 # ── 갭 backfill도 FDR 없이 돌아야 한다 ────────────────────────────────────────

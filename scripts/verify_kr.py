@@ -13,13 +13,10 @@ scripts/verify_kr.py — KR DB 현황 검증 + 누락 구간 출력
 """
 
 import argparse
-import io
+import re
 import sys
 from datetime import date, timedelta
 from pathlib import Path
-
-# Windows 콘솔 UTF-8 출력
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
 import pandas as pd
 import pyarrow.parquet as pq
@@ -29,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import config
 from data import kr_db
+from data.execution_safety import writer_lock, configure_logging, cli_entry
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -54,7 +52,7 @@ def analyze_year(year: int) -> dict:
         return result
 
     try:
-        df = pq.read_table(str(path), columns=["Code", "Date"]).to_pandas()
+        df = kr_db.load_year(year, strict=True)
         df["Date"] = pd.to_datetime(df["Date"]).dt.date
 
         trading_dates = sorted(df["Date"].unique())
@@ -66,7 +64,7 @@ def analyze_year(year: int) -> dict:
         result["dates_set"] = set(trading_dates)
 
     except Exception as e:
-        result["error"] = str(e)
+        result["error"] = "kr_baseline_invalid"
 
     return result
 
@@ -153,7 +151,7 @@ def print_report(analyses: list[dict]):
 
         for gs, ge in gaps:
             bdays_in_gap = len(_bdays(gs, ge))
-            print(f"    └─ 누락: {gs} ~ {ge}  ({bdays_in_gap} 영업일)")
+            print(f"    └─ 원천 확인 필요 후보(공휴일 미반영): {gs} ~ {ge}  ({bdays_in_gap} 영업일)")
             all_gaps.append((year, gs, ge, bdays_in_gap))
 
     print("=" * 60)
@@ -189,6 +187,11 @@ def main():
     )
     args = parser.parse_args()
 
+    with writer_lock():
+        return verify(args)
+
+
+def verify(args):
     # Drive에서 다운로드
     if args.drive:
         print("Drive에서 KR parquet 다운로드 중...")
@@ -197,25 +200,26 @@ def main():
     # 파일 목록 수집 (로컬)
     local_root = kr_db._LOCAL_ROOT
     if not local_root.exists():
-        print(f"로컬 KR 폴더 없음: {local_root}")
+        print("로컬 KR 폴더 없음")
         if not args.drive:
             print("--drive 옵션으로 Drive에서 다운로드하세요.")
-        return
+        return 1
 
     parquet_files = sorted(local_root.glob("marcap-*.parquet"))
     if not parquet_files:
         print("로컬에 marcap-*.parquet 파일 없음")
-        return
+        return 1
 
     years = []
     for f in parquet_files:
-        try:
-            year = int(f.stem.replace("marcap-", ""))
-            years.append(year)
-        except ValueError:
-            pass
+        match = re.fullmatch(r"marcap-([0-9]{4})\.parquet", f.name)
+        if not match:
+            raise RuntimeError("kr_local_filename_invalid")
+        years.append(int(match.group(1)))
 
     analyses = [analyze_year(y) for y in sorted(years)]
+    if any("error" in item for item in analyses):
+        raise RuntimeError("kr_baseline_invalid")
     all_gaps = print_report(analyses)
 
     # 누락 자동 보완
@@ -223,14 +227,18 @@ def main():
         print("누락 구간 자동 backfill 시작...")
         from data import kr_collector
 
+        states = kr_db.ensure_year_baselines([item[0] for item in all_gaps], download=args.drive)
+        if "failed" in states.values():
+            raise RuntimeError("kr_baseline_failed")
         for year, gs, ge, cnt in all_gaps:
             print(f"\n  → {gs} ~ {ge} ({cnt} 영업일) 수집 중...")
             df = kr_collector.collect_backfill(str(gs), str(ge))
             if not df.empty:
-                updated = kr_db.append_rows(df)
+                kr_collector.validate_price_basis(df)
+                updated = kr_db.append_rows(df, ohlc_only=True)
                 print(f"     저장 완료: {updated}년 파일 업데이트")
             else:
-                print(f"     ⚠️ 수집 결과 없음")
+                raise RuntimeError("kr_collection_empty_unverified")
 
         print("\n✅ backfill 완료 — 재검증:")
         analyses2 = [analyze_year(y) for y in sorted(years)]
@@ -238,4 +246,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    configure_logging()
+    raise SystemExit(cli_entry(main))

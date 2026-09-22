@@ -2,12 +2,12 @@
 data/kr_collector.py — KR 시장 OHLC+시총 수집
 
 수집 전략:
-  [daily]   FDR StockListing × 2 (KOSPI + KOSDAQ + KONEX)
-              → 당일 스냅샷: OHLCV + Marcap + Rank + Market 포함
+  [daily]   고정 FDR 캐시의 같은 날짜 CSV 한 번 (KOSPI + KOSDAQ + KONEX)
+              → 원천 세션 날짜 스냅샷: OHLCV + Marcap + Rank + Market 포함
               → marcap 스키마 그대로 사용
 
   [backfill] yfinance .KS/.KQ 배치 수집
-              → 과거 OHLCV (Marcap/Rank = NaN, Market은 종목 목록에서 보완)
+              → 과거 OHLCV 후보 (Marcap/Stocks/Rank 결측, 원천 기준 미확인 시 게시 보류)
               → pykrx 전종목 엔드포인트는 GHA 환경에서 차단됨 → yfinance 우회
 
 출력 스키마 (marcap 표준):
@@ -17,11 +17,16 @@ data/kr_collector.py — KR 시장 OHLC+시총 수집
 """
 
 import logging
+import io
+import json
+import re
 import time
 from datetime import date, datetime, timedelta
+from importlib.metadata import version
 from typing import Optional
 
 import pandas as pd
+import requests
 
 import config
 
@@ -36,66 +41,114 @@ _BATCH_SIZE = 100
 # [1] Daily — FDR StockListing (당일 스냅샷)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def collect_daily() -> pd.DataFrame:
-    """
-    FDR StockListing으로 오늘 전종목 스냅샷 수집.
-    KOSPI + KOSDAQ + KONEX 합산 → marcap 스키마 반환.
-    장 마감 후 실행 권장 (당일 종가 반영).
+class KrCollectionError(RuntimeError):
+    def __init__(self, code: str):
+        self.code = code
+        super().__init__(code)
+
+
+def _response_bytes(get, url: str, headers: dict, limit: int) -> bytes:
+    with get(url, headers=headers, timeout=(5, 20), stream=True, allow_redirects=False) as response:
+        if response.status_code != 200:
+            raise KrCollectionError("kr_source_failed")
+        body = bytearray()
+        for chunk in response.iter_content(65536):
+            body.extend(chunk)
+            if len(body) > limit:
+                raise KrCollectionError("kr_source_too_large")
+        if not body:
+            raise KrCollectionError("empty_unverified")
+        return bytes(body)
+
+
+def snapshot_source_date(frame: pd.DataFrame) -> date:
+    """같은 응답으로 선택한 원천 일자와 실제 행 일자가 일치하는지 검증한다."""
+    proof = frame.attrs.get("krx_snapshot")
+    if (not isinstance(proof, dict) or set(proof) != {"version", "provider", "source_date"}
+            or type(proof["version"]) is not int or proof["version"] != 1
+            or proof["provider"] != "fdr_krx_cache" or frame.empty):
+        raise KrCollectionError("source_date_unverified")
+    try:
+        text = proof["source_date"]
+        if not isinstance(text, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+            raise ValueError()
+        day = date.fromisoformat(text)
+        dates = pd.to_datetime(frame["Date"], errors="raise").dt.date
+        if dates.isna().any() or not dates.eq(day).all():
+            raise ValueError()
+        return day
+    except (ValueError, KeyError, TypeError, AttributeError):
+        raise KrCollectionError("source_date_unverified") from None
+
+
+def read_krx_snapshot(*, request_get=None) -> pd.DataFrame:
+    """FDR 0.9.202의 날짜 선택→그 날짜 CSV 경로를 사용하고 날짜를 보존한다.
+
+    StockListing이 날짜 응답을 두 번 받고 attrs에서 날짜를 버리는 부분만
+    작은 adapter로 바꾼다. 별도의 '현재 날짜' 재조회나 상류 함수 패치는 없다.
     """
     try:
-        import FinanceDataReader as fdr
-    except ImportError:
-        raise ImportError("finance-datareader를 설치하세요: pip install finance-datareader")
+        if version("finance-datareader") != "0.9.202":
+            raise KrCollectionError("fdr_version_unverified")
+        get = request_get or requests.get
+        headers = {"User-Agent": "Mozilla/5.0", "Referer":
+            "https://data.krx.co.kr/contents/MDC/MDI/outerLoader/index.cmd"}
+        url = ("http://data.krx.co.kr/comm/bldAttendant/executeForResourceBundle.cmd"
+               "?baseName=krx.mdc.i18n.component&key=B128.bld")
+        raw = _response_bytes(get, url, headers, 1024 * 1024)
+        payload = json.loads(raw)
+        selected = payload["result"]["output"][0]["max_work_dt"]
+        if not isinstance(selected, str) or not re.fullmatch(r"[0-9]{8}", selected):
+            raise KrCollectionError("source_date_unverified")
+        source_day = datetime.strptime(selected, "%Y%m%d").date()
+        csv_url = ("https://raw.githubusercontent.com/FinanceData/fdr_krx_data_cache/"
+                   f"refs/heads/master/data/listing/krx/{source_day.isoformat()}.csv")
+        body = _response_bytes(get, csv_url, headers, 16 * 1024 * 1024)
+        frame = pd.read_csv(io.BytesIO(body), index_col=0,
+            dtype={"Code": str, "Dept": str, "ChangeCode": str, "MarketId": str}).reset_index(drop=True)
+        required = {"Code", "MarketId", "Open", "High", "Low", "Close", "Volume", "Marcap", "Stocks"}
+        if frame.empty or not required.issubset(frame) or frame.columns.has_duplicates:
+            raise KrCollectionError("kr_snapshot_invalid")
+        if (frame["Code"].isna().any() or frame["Code"].duplicated().any()
+                or not frame["Code"].str.fullmatch(r"[0-9A-Z]{6}").all()
+                or not frame["MarketId"].isin(["STK", "KSQ", "KNX"]).all()):
+            raise KrCollectionError("kr_snapshot_invalid")
+        if "Date" in frame and not pd.to_datetime(frame["Date"]).dt.date.eq(source_day).all():
+            raise KrCollectionError("source_date_unverified")
+        frame["Date"] = pd.Timestamp(source_day)
+        frame.attrs["krx_snapshot"] = {"version": 1, "provider": "fdr_krx_cache",
+                                         "source_date": source_day.isoformat()}
+        snapshot_source_date(frame)
+        return frame
+    except KrCollectionError:
+        raise
+    except Exception:
+        raise KrCollectionError("kr_source_failed") from None
 
-    markets = ["KOSPI", "KOSDAQ", "KONEX"]
-    frames = []
 
-    for market in markets:
-        try:
-            df = fdr.StockListing(market)
-            if df is None or df.empty:
-                logger.warning(f"[KrCollector] {market} StockListing 빈 응답")
-                continue
+def validate_price_basis(frame: pd.DataFrame):
+    """KR adjusted Yahoo 후보를 FDR 기준과 임의로 섞어 저장하지 않는다."""
+    if frame.attrs.get("kr_price_basis", {}).get("provider") == "yfinance":
+        raise KrCollectionError("price_basis_unverified")
+    snapshot_source_date(frame)
 
-            df = df.copy()
 
-            # 컬럼 정규화 (FDR 버전에 따라 ChagesRatio / ChangesRatio 혼재)
-            if "ChagesRatio" in df.columns and "ChangesRatio" not in df.columns:
-                df = df.rename(columns={"ChagesRatio": "ChangesRatio"})
-            elif "ChagesRatio" in df.columns and "ChangesRatio" in df.columns:
-                df = df.drop(columns=["ChagesRatio"])
-
-            # Unnamed 컬럼 제거
-            df = df.loc[:, ~df.columns.str.startswith("Unnamed")]
-
-            # Market / MarketId 보정
-            df["Market"] = market
-            if "MarketId" not in df.columns:
-                df["MarketId"] = _MARKETID_MAP.get(market, "STK")
-
-            # Rank: 시총 기준 내림차순 (시장 내 순위)
-            if "Marcap" in df.columns:
-                df["Rank"] = df["Marcap"].rank(ascending=False, method="min").astype("Int64")
-            else:
-                df["Rank"] = 0
-
-            # Date 추가 (오늘)
-            df["Date"] = pd.Timestamp(date.today())
-
-            frames.append(df)
-            logger.info(f"[KrCollector] {market} StockListing: {len(df)}종목")
-
-        except Exception as e:
-            logger.error(f"[KrCollector] {market} StockListing 실패: {e}")
-
-    if not frames:
-        logger.error("[KrCollector] daily 수집 결과 없음")
-        return pd.DataFrame()
-
-    result = pd.concat(frames, ignore_index=True)
-    result = _normalize_schema(result)
-
-    logger.info(f"[KrCollector] daily 수집 완료: {len(result):,}종목")
+def collect_daily() -> pd.DataFrame:
+    """한 원천 응답의 세 시장을 합친다. 지난 세션을 today로 바꾸지 않는다."""
+    frame = read_krx_snapshot()
+    proof = dict(frame.attrs["krx_snapshot"])
+    if "ChagesRatio" in frame:
+        if "ChangesRatio" in frame:
+            frame = frame.drop(columns=["ChagesRatio"])
+        else:
+            frame = frame.rename(columns={"ChagesRatio": "ChangesRatio"})
+    frame["Market"] = frame["MarketId"].map({"STK": "KOSPI", "KSQ": "KOSDAQ", "KNX": "KONEX"})
+    frame["Marcap"] = pd.to_numeric(frame["Marcap"], errors="raise")
+    frame["Rank"] = frame.groupby("Market")["Marcap"].rank(ascending=False, method="min").astype("Int64")
+    result = _normalize_schema(frame)
+    result.attrs["krx_snapshot"] = proof
+    snapshot_source_date(result)
+    logger.info("[KrCollector] 원천 세션 스냅샷 수신: %s / %s종목", proof["source_date"], len(result))
     return result
 
 
@@ -247,8 +300,8 @@ def _collect_yfinance_day(
                 df_t["ChangesRatio"] = float("nan")
                 df_t["Amount"] = df_t["Close"] * df_t["Volume"]
                 df_t["Marcap"] = float("nan")
-                df_t["Stocks"] = 0
-                df_t["Rank"] = 0
+                df_t["Stocks"] = pd.NA
+                df_t["Rank"] = pd.NA
 
                 df_t = df_t.dropna(subset=["Close"])
                 df_t = df_t[df_t["Close"] > 0]
@@ -267,6 +320,7 @@ def _collect_yfinance_day(
 
     result = pd.concat(all_rows, ignore_index=True)
     result = result.drop_duplicates(subset=["Code", "Date"], keep="last")
+    result.attrs["kr_price_basis"] = {"provider": "yfinance", "auto_adjust": True}
     logger.info(f"[KrCollector] {label} 완료: {len(result)}종목")
     return result
 
@@ -388,8 +442,8 @@ def collect_backfill(start_date: str, end_date: str,
                 df_t["ChangesRatio"] = df_t["Close"].pct_change(fill_method=None) * 100
                 df_t["Amount"] = df_t["Close"] * df_t["Volume"]
                 df_t["Marcap"] = float("nan")
-                df_t["Stocks"] = 0
-                df_t["Rank"] = 0
+                df_t["Stocks"] = pd.NA
+                df_t["Rank"] = pd.NA
 
                 df_t = df_t.dropna(subset=["Close"])
                 df_t = df_t[df_t["Close"] > 0]
@@ -409,6 +463,7 @@ def collect_backfill(start_date: str, end_date: str,
     result = pd.concat(all_rows, ignore_index=True)
     result = result.drop_duplicates(subset=["Code", "Date"], keep="last")
     result = result.sort_values(["Date", "Code"]).reset_index(drop=True)
+    result.attrs["kr_price_basis"] = {"provider": "yfinance", "auto_adjust": True}
 
     logger.info(
         f"[KrCollector] backfill 완료: {len(result):,}행 "
@@ -484,7 +539,7 @@ def _build_universe(fdr, fallback_meta: Optional[dict[str, dict]] = None) -> pd.
 
 def _extract_ticker(raw: pd.DataFrame, ticker: str, batch_size: int) -> Optional[pd.DataFrame]:
     """yfinance MultiIndex 응답에서 단일 ticker 추출."""
-    if batch_size == 1:
+    if batch_size == 1 and not isinstance(raw.columns, pd.MultiIndex):
         return raw.copy()
 
     cols = raw.columns
@@ -514,4 +569,6 @@ def _normalize_schema(df: pd.DataFrame) -> pd.DataFrame:
     for col in SCHEMA_COLS:
         if col not in df.columns:
             df[col] = None
+    for col in ("Stocks", "Rank"):
+        df[col] = pd.to_numeric(df[col], errors="raise").astype("Int64")
     return df[SCHEMA_COLS].copy()

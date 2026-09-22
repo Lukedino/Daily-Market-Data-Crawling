@@ -11,10 +11,11 @@ data/ohlc_db.py — US/Crypto OHLC 로컬 Parquet DB 관리
 
 import json
 import logging
+import math
 import os
 import re
 import tempfile
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -57,6 +58,8 @@ def local_path(market: str, year: int) -> Path:
 
 def _read_year_path(path: Path, year: int | None = None) -> pd.DataFrame:
     df = pq.read_table(str(path)).to_pandas()
+    if df.columns.has_duplicates or not {"Ticker", "Date"}.issubset(df.columns):
+        raise ValueError("OHLC baseline key schema invalid")
     if df.empty:
         return df if len(df.columns) else pd.DataFrame(columns=_SCHEMA_COLS)
     if df.columns.has_duplicates or not {"Ticker", "Date"}.issubset(df.columns):
@@ -298,6 +301,68 @@ class CoverageGapError(RuntimeError):
     """연도 파일 안에서 유니버스가 하루 만에 급감하는 경우."""
 
 
+class PriceBasisError(RuntimeError):
+    """가격 오류를 단정하지 않고, 조정 기준 미확인 후보의 게시를 보류한다."""
+
+    def __init__(self, code: str):
+        self.code = code
+        super().__init__(code)
+
+
+def validate_price_basis(df: pd.DataFrame, market: str, *, as_of: date | None = None,
+                         replace_tickers=()):
+    """확정 과거 overlap과 원천 actions를 확인한다. 전체 이력의 기준 증명은 아니다."""
+    request = df.attrs.get("ohlc_request")
+    if request is not None and (request.get("actions_complete") is not True
+                                or request.get("action_tickers")):
+        raise PriceBasisError("price_basis_unverified")
+    if df.empty:
+        return
+    incoming = df.copy()
+    incoming["Date"] = pd.to_datetime(incoming["Date"]).dt.date
+    as_of = as_of or datetime.now(timezone.utc).date()
+    for year in sorted({day.year for day in incoming["Date"]}):
+        existing = load_year(market, year, strict=True)
+        if existing.empty:
+            continue
+        old = existing.set_index(["Ticker", "Date"])
+        new = incoming[incoming["Date"].map(lambda day: day.year == year)].set_index(["Ticker", "Date"])
+        for key in old.index.intersection(new.index):
+            if key[0] in replace_tickers:
+                continue  # 기존의 명시적인 Crypto 심볼 정정/purge 계약은 유지한다.
+            # Crypto 당일 및 직전 UTC 일봉은 이전 실행에서 미완성이었을 수 있다.
+            # 기존 7일 재조회에 의한 봉 완성을 가격 기준 변경으로 오인하지 않는다.
+            if market == "crypto" and key[1] >= as_of - timedelta(days=1):
+                continue
+            for column in ("Open", "High", "Low", "Close"):
+                if column not in old or column not in new:
+                    raise PriceBasisError("price_basis_unverified")
+                try:
+                    before, after = float(old.at[key, column]), float(new.at[key, column])
+                except (TypeError, ValueError):
+                    raise PriceBasisError("price_basis_unverified") from None
+                if not math.isfinite(before) or not math.isfinite(after):
+                    raise PriceBasisError("price_basis_unverified")
+                if not math.isclose(before, after, rel_tol=1e-7, abs_tol=1e-8):
+                    raise PriceBasisError("price_basis_mismatch")
+
+
+def _preserve_missing_marketcap(existing: pd.DataFrame, incoming: pd.DataFrame) -> pd.DataFrame:
+    """동일 키의 신규 시총 결측만 보존한다. 가격·거래량·명시적인 0은 그대로 갱신한다."""
+    if existing.empty or incoming.empty or "MarketCap" not in existing:
+        return incoming
+    result = incoming.copy()
+    if "MarketCap" not in result:
+        result["MarketCap"] = float("nan")
+    old = pd.to_numeric(existing.set_index(["Ticker", "Date"])["MarketCap"], errors="coerce")
+    old = old.where(old.map(lambda value: pd.notna(value) and math.isfinite(value) and value >= 0))
+    keys = pd.MultiIndex.from_frame(result[["Ticker", "Date"]])
+    values = old.reindex(keys).to_numpy()
+    missing = result["MarketCap"].isna()
+    result.loc[missing, "MarketCap"] = values[missing.to_numpy()]
+    return result
+
+
 def check_coverage_continuity(df: pd.DataFrame,
                               drop_pct: float = COVERAGE_DROP_PCT,
                               min_universe: int = 100) -> dict:
@@ -435,6 +500,7 @@ def save_year(df: pd.DataFrame, market: str, year: int,
                         )
                 # 빈 프레임을 concat에 넣으면 dtype 추론이 흔들린다는 경고가 뜨므로
                 # 실제로 붙일 내용이 있을 때만 합친다.
+                df = _preserve_missing_marketcap(existing, df)
                 frames = [f for f in (existing, df) if not f.empty]
                 df = pd.concat(frames, ignore_index=True) if frames else df
         except Exception as e:
@@ -515,6 +581,8 @@ def save_year(df: pd.DataFrame, market: str, year: int,
                 f"의도한 것이라면 allow_gap=True 로 호출하라."
             )
 
+    # 요청 단위 관측 메타는 혼합 연도 파일 전체의 영구 출처 증명이 아니다.
+    df.attrs = {}
     table = pa.Table.from_pandas(df, preserve_index=False)
     temporary = _temporary_path(path)
     try:
@@ -682,7 +750,8 @@ def upload_years(market: str, years: list[int], uploader=None) -> list[str]:
             continue
         try:
             load_year(market, year, strict=True)
-            if u.upload(str(path), remote_path) is False:
+            receipt = u.upload(str(path), remote_path)
+            if not (receipt is True or isinstance(receipt, str) and receipt.strip()):
                 raise DriveSyncError("Drive upload rejected")
         except Exception as e:
             # 공개 저장소 로그다. 예외 문자열에는 Drive 파일·폴더 ID 가 실릴 수 있어 종류만 남긴다.
@@ -731,7 +800,8 @@ def _upload_metadata(path: Path, uploader=None) -> bool:
     try:
         if not isinstance(json.loads(path.read_text(encoding="utf-8")), dict):
             raise ValueError("metadata must be an object")
-        if u.upload(str(path), remote_path) is False:
+        receipt = u.upload(str(path), remote_path)
+        if not (receipt is True or isinstance(receipt, str) and receipt.strip()):
             raise ValueError("metadata upload rejected")
         return True
     except Exception as e:
@@ -824,124 +894,193 @@ def sector_meta_path(market: str) -> Path:
     return local_dir(market) / f"{market}_sector_meta.parquet"
 
 
+_SECTOR_COLUMNS = ["Ticker", "Market", "Sector", "Industry", "updated_at"]
+
+
+def _validate_sector_frame(df: pd.DataFrame) -> pd.DataFrame:
+    if df.columns.has_duplicates or not set(_SECTOR_COLUMNS).issubset(df.columns):
+        raise DriveSyncError("sector_schema_invalid")
+    result = df[_SECTOR_COLUMNS].copy()
+    result.attrs = {}
+    if result.empty:
+        return result
+    if (result["Ticker"].map(lambda value: not isinstance(value, str) or not value.strip()).any()
+            or result["Ticker"].str.strip().str.upper().duplicated().any()
+            or result["Market"].map(lambda value: not isinstance(value, str) or not value.strip()).any()):
+        raise DriveSyncError("sector_keys_invalid")
+    for column in ["Sector", "Industry"]:
+        if result[column].map(lambda value: not isinstance(value, str) and not pd.isna(value)).any():
+            raise DriveSyncError("sector_field_invalid")
+        result[column] = result[column].fillna("")
+    try:
+        stamps = pd.to_datetime(result["updated_at"], utc=True, errors="raise")
+        if stamps.isna().any():
+            raise ValueError()
+    except (ValueError, TypeError):
+        raise DriveSyncError("sector_timestamp_invalid") from None
+    return result.reset_index(drop=True)
+
+
+def _write_sector_frame(path: Path, frame: pd.DataFrame):
+    temporary = _temporary_path(path)
+    try:
+        pq.write_table(pa.Table.from_pandas(frame, preserve_index=False), temporary, compression="snappy")
+        with temporary.open("r+b") as stream:
+            os.fsync(stream.fileno())
+        observed = _validate_sector_frame(pq.read_table(temporary).to_pandas())
+        pd.testing.assert_frame_equal(frame.reset_index(drop=True), observed, check_dtype=False)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def save_sector_meta(df: pd.DataFrame, market: str, allow_shrink: bool = False):
-    """sector_meta parquet 저장 (덮어쓰기).
-
-    2026-08-31 수정: 040e7eb 가 save_year() 의 축소 가드를 복붙하면서 그 함수의
-    지역변수(_exempt·prior_n·allow_shrink·year·allow_gap)를 그대로 참조해, 비어 있지 않은
-    df 를 저장하는 순간 NameError — sector-meta 주간 수집이 08-30부터 전멸했다.
-    sector_meta 는 날짜 축이 없는 종목 메타이므로:
-      - 축소 가드: 기존 parquet 의 고유 종목 수와 비교해 자체 구현 (취지는 동일)
-      - 날짜별 커버리지 연속성 게이트: 적용 대상 아님 → 제거
-    """
+    """Preserve failed observations and old bytes until the candidate is verified."""
     if df.empty:
-        logger.warning(f"[OhlcDB] sector_meta 빈 DataFrame → 저장 건너뜀: {market}")
-        return
-    path = sector_meta_path(market)
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    # ── 축소 가드 — 작은 결과가 큰 파일을 덮어쓰지 못하게 ────────────────
-    prior_n = 0
-    if path.exists():
-        try:
-            prior = pd.read_parquet(path, columns=["Ticker"])
-            prior_n = int(prior["Ticker"].astype(str).str.strip().str.upper().nunique())
-        except Exception as e:
-            logger.warning(f"[OhlcDB] sector_meta 기존 파일 검사 실패({e!r}) — 가드 없이 진행")
-    new_n = (int(df["Ticker"].astype(str).str.strip().str.upper().nunique())
-             if "Ticker" in df.columns else None)
-    if prior_n and new_n is not None and not allow_shrink:
-        floor = prior_n * (1.0 - TICKER_SHRINK_TOLERANCE_PCT / 100.0)
-        if new_n < floor:
-            raise CoverageShrinkError(
-                f"{market} sector_meta 저장 중단 — 종목 수가 {prior_n:,}개에서 "
-                f"{new_n:,}개로 {(1 - new_n / prior_n) * 100:.1f}% 줄어든다 "
-                f"(허용 {TICKER_SHRINK_TOLERANCE_PCT:.0f}%). 수집 실패 가능성이 높다. "
-                f"의도한 축소라면 allow_shrink=True 로 호출하라."
-            )
-
-    table = pa.Table.from_pandas(df, preserve_index=False)
-    pq.write_table(table, str(path), compression="snappy")
-    size_kb = path.stat().st_size / 1024
-    logger.info(f"[OhlcDB] sector_meta 저장: {path.name} ({len(df)}종목, {size_kb:.1f}KB)")
+        raise DriveSyncError("sector_collection_empty")
+    prior = load_sector_meta(market)
+    failed_fields = df.attrs.get("sector_failed_fields", {})
+    candidate = df[_SECTOR_COLUMNS].copy()
+    old = prior.set_index("Ticker")
+    for index, row in candidate.iterrows():
+        failed = failed_fields.get(row["Ticker"], [])
+        if failed:
+            if row["Ticker"] not in old.index:
+                raise DriveSyncError("sector_observation_unverified")
+            for field in failed:
+                if field not in {"Sector", "Industry"}:
+                    raise DriveSyncError("sector_observation_invalid")
+                candidate.at[index, field] = old.at[row["Ticker"], field]
+            # One row timestamp must not certify fields that were not observed.
+            candidate.at[index, "updated_at"] = old.at[row["Ticker"], "updated_at"]
+    candidate = _validate_sector_frame(candidate)
+    if len(prior) and not allow_shrink:
+        floor = len(prior) * (1.0 - TICKER_SHRINK_TOLERANCE_PCT / 100.0)
+        if len(candidate) < floor:
+            raise CoverageShrinkError("sector_ticker_coverage_shrink")
+    _write_sector_frame(sector_meta_path(market), candidate)
+    logger.info("[OhlcDB] sector_saved rows=%d preserved=%d", len(candidate), len(failed_fields))
+    return True
 
 
 def load_sector_meta(market: str) -> pd.DataFrame:
-    """sector_meta parquet 로드. 파일 없으면 빈 DataFrame 반환."""
     path = sector_meta_path(market)
     if not path.exists():
-        return pd.DataFrame(columns=["Ticker", "Market", "Sector", "Industry", "updated_at"])
+        return pd.DataFrame(columns=_SECTOR_COLUMNS)
     try:
-        return pq.read_table(str(path)).to_pandas()
-    except Exception as e:
-        logger.error(f"[OhlcDB] sector_meta 로드 실패: {e}")
-        return pd.DataFrame(columns=["Ticker", "Market", "Sector", "Industry", "updated_at"])
+        return _validate_sector_frame(pq.read_table(path).to_pandas())
+    except Exception:
+        raise DriveSyncError("sector_baseline_invalid") from None
 
 
 def upload_sector_meta(market: str, uploader=None):
-    """sector_meta parquet를 Drive에 업로드."""
     u = _get_uploader(uploader)
-    if u is None:
-        return
-    remote_path = config.DRIVE_PATHS.get(f"ohlc_{market}")
-    if not remote_path:
-        logger.error(f"[OhlcDB] DRIVE_PATHS에 'ohlc_{market}' 없음")
-        return
     path = sector_meta_path(market)
-    if not path.exists():
-        logger.warning(f"[OhlcDB] sector_meta 없음: {path.name}")
-        return
+    remote = config.DRIVE_PATHS.get(f"ohlc_{market}")
+    if u is None or not remote or not path.is_file():
+        raise DriveSyncError("sector_upload_unavailable")
+    load_sector_meta(market)
     try:
-        u.upload(str(path), remote_path)
-        logger.info(f"[OhlcDB] sector_meta 업로드 완료: {path.name} → {remote_path}/")
-    except Exception as e:
-        logger.error(f"[OhlcDB] sector_meta 업로드 실패: {e}")
+        if not u.upload(str(path), remote):
+            raise DriveSyncError("sector_upload_unconfirmed")
+    except Exception:
+        raise DriveSyncError("sector_publication_failed") from None
+    return True
 
 
 def download_sector_meta(market: str, uploader=None) -> bool:
-    """Drive에서 sector_meta parquet 다운로드. 성공 True, 실패 False."""
+    """Only confirmed remote absence is False; retain valid unpublished local rows."""
+    prior = load_sector_meta(market)
     u = _get_uploader(uploader)
-    if u is None:
-        return False
-    remote_path = config.DRIVE_PATHS.get(f"ohlc_{market}")
-    if not remote_path:
-        logger.error(f"[OhlcDB] DRIVE_PATHS에 'ohlc_{market}' 없음")
-        return False
-    filename = f"{market}_sector_meta.parquet"
-    dest = sector_meta_path(market)
-    dest.parent.mkdir(parents=True, exist_ok=True)
+    remote = config.DRIVE_PATHS.get(f"ohlc_{market}")
+    if u is None or not remote:
+        raise DriveSyncError("sector_download_unavailable")
+    path = sector_meta_path(market)
+    temporary = _temporary_path(path)
     try:
-        u.download(remote_path, filename, str(dest))
-        logger.info(f"[OhlcDB] sector_meta 다운로드 완료: {filename}")
+        try:
+            result = u.download(remote, path.name, str(temporary))
+        except FileNotFoundError:
+            return False
+        if result is False:
+            raise DriveSyncError("sector_download_failed")
+        incoming = _validate_sector_frame(pq.read_table(temporary).to_pandas())
+        merged = pd.concat([prior, incoming], ignore_index=True)
+        if not merged.empty:
+            merged = merged.assign(_stamp=pd.to_datetime(merged["updated_at"], utc=True))
+            merged = merged.sort_values("_stamp", kind="stable").drop_duplicates("Ticker", keep="last")
+            merged = merged.drop(columns="_stamp").reset_index(drop=True)
+        _write_sector_frame(path, _validate_sector_frame(merged))
         return True
-    except FileNotFoundError:
-        logger.debug(f"[OhlcDB] Drive에 없음: {remote_path}/{filename}")
-        return False
-    except Exception as e:
-        logger.error(f"[OhlcDB] sector_meta 다운로드 실패: {e}")
-        return False
+    except Exception:
+        raise DriveSyncError("sector_download_failed") from None
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def download_all_years(market: str, uploader=None):
-    """
-    Drive 해당 시장 폴더의 모든 연도 파일을 로컬에 다운로드.
-    drive_uploader.download_all() 활용.
-    """
+    """전체 목록을 staging에서 검증·병합한 후 반영한다. 실패는 빈 기준이 아니다."""
+    if market not in {"us", "crypto"}:
+        raise DriveSyncError("ohlc_market_invalid")
     u = _get_uploader(uploader)
     if u is None:
-        return
-
-    remote_key = f"ohlc_{market}"
-    remote_path = config.DRIVE_PATHS.get(remote_key)
+        raise DriveSyncError("ohlc_uploader_unavailable")
+    remote_path = config.DRIVE_PATHS.get(f"ohlc_{market}")
     if not remote_path:
-        logger.error(f"[OhlcDB] DRIVE_PATHS에 '{remote_key}' 없음")
-        return
-
+        raise DriveSyncError("ohlc_remote_unconfigured")
     local_d = local_dir(market)
     local_d.mkdir(parents=True, exist_ok=True)
-
+    candidates = []
     try:
-        u.download_all(remote_path, str(local_d), extensions=(".parquet",))
-        logger.info(f"[OhlcDB] {market} 전체 연도 다운로드 완료")
-    except Exception as e:
-        logger.error(f"[OhlcDB] {market} 전체 다운로드 실패: {e}")
+        # 원격이 absent여도 손상된 기존 로컬 파일을 정상 baseline으로 인증하지 않는다.
+        for path in local_d.glob(f"{market}_????.parquet"):
+            _read_year_path(path, int(path.stem.rsplit("_", 1)[1]))
+        with tempfile.TemporaryDirectory(prefix=f".{market}-baseline-", dir=local_d) as temporary_dir:
+            stage = Path(temporary_dir)
+            outcome = u.download_all_state(remote_path, str(stage), extensions=(".parquet",))
+            if outcome not in {"ok", "absent"}:
+                raise DriveSyncError("ohlc_baseline_failed")
+            paths = sorted(stage.iterdir())
+            if outcome == "absent":
+                if paths:
+                    raise DriveSyncError("ohlc_baseline_inconsistent")
+                return "absent"
+            if not paths:
+                raise DriveSyncError("ohlc_baseline_incomplete")
+            for path in paths:
+                if path.name == f"{market}_sector_meta.parquet":
+                    continue  # 별도 strict sector baseline 경로가 소유한다.
+                match = re.fullmatch(re.escape(market) + r"_([0-9]{4})\.parquet", path.name)
+                if not match or not path.is_file() or path.is_symlink():
+                    raise DriveSyncError("ohlc_baseline_name_invalid")
+                year = int(match.group(1))
+                downloaded = _read_year_path(path, year)
+                existing = load_year(market, year, strict=True)
+                if downloaded.empty:
+                    merged = existing if not existing.empty else downloaded
+                elif existing.empty:
+                    merged = downloaded
+                else:
+                    merged = downloaded.set_index(["Ticker", "Date"]).combine_first(
+                        existing.set_index(["Ticker", "Date"])).reset_index()
+                merged.attrs = {}
+                dest = local_path(market, year)
+                candidate = _temporary_path(dest)
+                candidates.append((candidate, dest))
+                pq.write_table(pa.Table.from_pandas(merged, preserve_index=False), str(candidate), compression="snappy")
+                with candidate.open("r+b") as stream:
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                pd.testing.assert_frame_equal(_read_year_path(candidate, year), merged,
+                                              check_dtype=False, check_exact=True)
+            # 모든 다운로드/읽기/후보 검증이 끝나기 전에는 기존 연도 파일을 바꾸지 않는다.
+            for candidate, dest in candidates:
+                os.replace(candidate, dest)
+            return "ok" if candidates else "absent"
+    except DriveSyncError:
+        raise
+    except Exception:
+        raise DriveSyncError("ohlc_baseline_failed") from None
+    finally:
+        for candidate, _ in candidates:
+            candidate.unlink(missing_ok=True)

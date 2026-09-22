@@ -15,9 +15,10 @@ data/ohlc_collector.py — US 주식/ETF 및 크립토 OHLC 수집 (yfinance)
 """
 
 import logging
+import math
 import re
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from io import StringIO
 from pathlib import Path
 from typing import Optional
@@ -31,6 +32,15 @@ except ImportError:
     YFRateLimitError = None
 
 logger = logging.getLogger(__name__)
+
+
+class CollectionIncompleteError(RuntimeError):
+    """확인하지 못한 종목/세션을 완료 커서로 인증하지 않는다."""
+
+    def __init__(self, code: str, tickers=()):
+        self.code = code
+        self.tickers = tuple(sorted(set(tickers)))
+        super().__init__(code)
 
 # ── 파일 override 경로 ────────────────────────────────────────────────────────
 _UNIVERSE_FILES = {
@@ -357,6 +367,25 @@ def _finalize_ticker_frame(df_t: pd.DataFrame, label: str) -> Optional[pd.DataFr
     (_retry_crypto_with_search)에서 실제 조회 심볼(HYPE32196-USD)과
     저장할 이름(HYPE-USD)이 달라지므로 분리해서 받는다.
     """
+    # yfinance multi.reindex_dfs는 거래소별 날짜의 합집합으로 배치를 정렬한다.
+    # 이때 생긴 전체 결측 행만 제거한다. 일부 가격만 결측인 행은 아래서 거절한다.
+    df_t = df_t.dropna(how="all").copy()
+    if df_t.empty:
+        return None
+    # 저장 컬럼의 기존 Dividends=0/Splits=1 의미는 유지한다. 실제 이벤트는
+    # 별도 후보 검증에 사용하며, 이력 정책 결정 없이 조정 기준을 덮지 않는다.
+    actions_complete = {"Dividends", "Stock Splits"}.issubset(df_t.columns)
+    action_seen = False
+    if actions_complete:
+        dividends = pd.to_numeric(df_t["Dividends"], errors="coerce")
+        splits = pd.to_numeric(df_t["Stock Splits"], errors="coerce")
+        actions_complete = bool(dividends.notna().all() and splits.notna().all())
+        action_seen = bool(dividends.fillna(0).ne(0).any()
+                           or (~splits.fillna(0).isin([0, 1])).any())
+        if "Capital Gains" in df_t:
+            gains = pd.to_numeric(df_t["Capital Gains"], errors="coerce")
+            actions_complete = actions_complete and bool(gains.notna().all())
+            action_seen = action_seen or bool(gains.fillna(0).ne(0).any())
     # tz 제거 및 Date 변환
     df_t = df_t.reset_index()
     date_col = df_t.columns[0]  # 'Date' or 'Datetime'
@@ -373,6 +402,10 @@ def _finalize_ticker_frame(df_t: pd.DataFrame, label: str) -> Optional[pd.DataFr
     })
 
     df_t["Ticker"] = label
+    values = df_t[["Open", "High", "Low", "Close", "Volume"]].apply(pd.to_numeric, errors="coerce")
+    if not values.apply(lambda column: column.map(math.isfinite)).all().all():
+        raise CollectionIncompleteError("price_values_unverified", [label])
+    df_t[values.columns] = values
     keep = ["Ticker", "Date", "Open", "High", "Low", "Close", "Volume"]
     df_t = df_t[[c for c in keep if c in df_t.columns]]
 
@@ -393,6 +426,7 @@ def _finalize_ticker_frame(df_t: pd.DataFrame, label: str) -> Optional[pd.DataFr
     # Dividends / Splits 초기값
     df_t["Dividends"] = 0.0
     df_t["Splits"]    = 1.0
+    df_t.attrs["source_actions"] = {"complete": actions_complete, "observed": action_seen}
     return df_t
 
 
@@ -606,7 +640,7 @@ def _retry_crypto_missing(
             tried.add(cand.upper())
 
             try:
-                raw = yf.download(cand, start=start, end=end, auto_adjust=True,
+                raw = yf.download(cand, start=start, end=end, auto_adjust=True, actions=True,
                                   progress=False, threads=False)
                 if raw is None or raw.empty:
                     continue
@@ -750,6 +784,7 @@ def fetch_ohlc_range(
                     start=start,
                     end=end,
                     auto_adjust=True,
+                    actions=True,
                     progress=False,
                     group_by="ticker",
                     threads=True,
@@ -819,6 +854,9 @@ def fetch_ohlc_range(
         all_rows.extend(_retry_crypto_missing(missing_crypto, start, end,
                                                already_queried=query_of))
 
+    recovered = {ticker for frame in all_rows for ticker in frame["Ticker"].unique()}
+    failed = sorted(set(failed) - recovered)
+
     if failed:
         logger.warning(f"[OhlcCollector] 실패 종목 ({len(failed)}개): {failed[:20]}")
 
@@ -834,6 +872,16 @@ def fetch_ohlc_range(
 
     # 컬럼 순서 통일
     result = result[[c for c in _EXTENDED_COLS if c in result.columns]]
+    result.attrs["ohlc_request"] = {
+        "provider": "yfinance", "auto_adjust": True, "actions_requested": True,
+        "start": start, "end_exclusive": end,
+        "observed_at": datetime.now(timezone.utc).isoformat(),
+        "actions_complete": all(frame.attrs.get("source_actions", {}).get("complete") is True
+                                for frame in all_rows),
+        "action_tickers": sorted({str(ticker) for frame in all_rows
+            if frame.attrs.get("source_actions", {}).get("observed")
+            for ticker in frame["Ticker"].unique()}),
+    }
 
     logger.info(
         f"[OhlcCollector] 수집 완료: {start}~{end} "
@@ -961,6 +1009,7 @@ def backfill_market(
         # 데이터를 걷어내야 한다 (ARB 2022년이 정확히 이 경우 — Arbitrum은 2023년
         # 출시라 올바른 심볼에 2022년 데이터가 없는데, 옛 오염 행이 남아 있었다).
         purge = purge_targets(symbol_overrides, failed_tickers)
+        ohlc_db.validate_price_basis(df, market, replace_tickers=purge)
         if df.empty:
             logger.warning(f"[OhlcCollector] {market} {year}년 데이터 없음 — 기존 행만 정리")
 
@@ -1072,6 +1121,7 @@ def backfill_new_tickers(
         if df.empty:
             logger.warning(f"[NewTickerBackfill] {market} {year}년 데이터 없음")
             continue
+        ohlc_db.validate_price_basis(df, market)
 
         if year == current_year:
             if market == "crypto":
@@ -1147,14 +1197,47 @@ CRYPTO_LOOKBACK_DAYS = 7
    조회되지 않아 Drive 파일에 영구 구멍이 됐다. 1주를 매번 다시 받으면 200종목×7일
    =1,400행 수준의 비용으로 이런 결손이 다음 실행에서 자연 치유된다.
 save_year()가 (Ticker, Date) 중복을 keep="last"로 정리하므로 최신 조회분이 이긴다.
-US 는 장마감(UTC 20~21시)이 크롤보다 앞서 캔들이 확정이라 다음날부터 조회한다."""
+US도 직전 저장 세션을 함께 조회해 유한한 과거 가격의 조정 기준 불일치를 확인한다."""
 
 
 def incremental_start_date(market: str, last_date: date) -> date:
-    """증분 조회 시작일 — 크립토는 최근 CRYPTO_LOOKBACK_DAYS 일을 다시 받는다."""
+    """Crypto 7일 유지, US는 직전 저장 거래일도 받아 가격 기준을 비교한다."""
     if market == "crypto":
         return last_date - timedelta(days=CRYPTO_LOOKBACK_DAYS - 1)
-    return last_date + timedelta(days=1)
+    return last_date
+
+
+def _incremental_cursor(frame: pd.DataFrame, tickers: list[str], failed: list[str],
+                        last_date: date, market: str) -> date:
+    if frame.empty:
+        raise CollectionIncompleteError("empty_unverified", tickers)
+    required = set(tickers)
+    collected = set(frame["Ticker"])
+    missing = (required - collected) | set(failed)
+    if missing:
+        raise CollectionIncompleteError("collection_incomplete", missing)
+    if collected - required:
+        raise CollectionIncompleteError("collection_unexpected_ticker")
+    dates = pd.to_datetime(frame["Date"], errors="raise").dt.date
+    if dates.isna().any() or frame.assign(Date=dates).duplicated(["Ticker", "Date"]).any():
+        raise CollectionIncompleteError("collection_invalid_dates")
+    by_ticker = {ticker: set(dates[frame["Ticker"] == ticker]) for ticker in required}
+    # 서로 다른 거래소의 휴장일을 강제로 일치시키지 않는다. 동일 달력군의
+    # 첫~마지막 반환일 내부 구멍도 휴장/정지라고 추정하지 않고 보류한다.
+    groups = {}
+    for ticker in required:
+        suffix = _EXCHANGE_SUFFIX_RE.search(ticker) if market == "us" else None
+        group = suffix.group(0) if suffix else market
+        groups.setdefault(group, []).append(ticker)
+    for cohort in groups.values():
+        observed_dates = set().union(*(by_ticker[t] for t in cohort))
+        for ticker in cohort:
+            present = by_ticker[ticker]
+            if any(min(present) <= day <= max(present) and day not in present
+                   for day in observed_dates):
+                raise CollectionIncompleteError("session_unverified", [ticker])
+    # 일부 종목만 최근 날짜까지 왔다고 공통 max 커서를 앞당기지 않는다.
+    return max(last_date, min(max(days) for days in by_ticker.values()))
 
 
 def update_market(
@@ -1167,7 +1250,7 @@ def update_market(
 
     1. Drive에서 db_status.json 다운로드
     2. last_date 파싱 (없으면 오늘 - 1년)
-    3. start = last_date + 1일, end = 오늘
+    3. US는 마지막 저장일, Crypto는 그로부터 6일 전부터 오늘까지 조회
     4. start >= end 이면 "이미 최신" 로그 후 반환
     5. 현재 연도 parquet을 Drive에서 다운로드 (로컬에 없으면)
     6. fetch_ohlc_range 수집
@@ -1178,6 +1261,8 @@ def update_market(
 
     if tickers is None:
         tickers = load_tickers(market)
+    if not tickers:
+        raise CollectionIncompleteError("empty_universe")
 
     # 1. Drive에서 status 다운로드
     if upload:
@@ -1224,15 +1309,12 @@ def update_market(
 
     # 6. 수집
     try:
-        new_df, _ = fetch_ohlc_range(tickers, start_str, end_str,
+        new_df, failed = fetch_ohlc_range(tickers, start_str, end_str,
                                       symbol_overrides=build_symbol_overrides(tickers))
-    except Exception as e:
-        logger.error(f"[OhlcCollector] {market} 증분 수집 실패: {e}")
-        return
-
-    if new_df.empty:
-        logger.warning(f"[OhlcCollector] {market} 증분 수집 결과 없음")
-        return
+    except Exception:
+        raise CollectionIncompleteError("collection_failed") from None
+    actual_last = _incremental_cursor(new_df, tickers, failed, last_date, market)
+    ohlc_db.validate_price_basis(new_df, market)
 
     # 6-b. MarketCap 보강
     if market == "crypto":
@@ -1252,7 +1334,6 @@ def update_market(
 
     # 8. 상태 갱신
     if "Date" in new_df.columns:
-        actual_last = new_df["Date"].max()
         actual_oldest_str = market_status.get("oldest_date")
         actual_oldest: Optional[date] = None
         if actual_oldest_str:
@@ -1262,7 +1343,7 @@ def update_market(
                 pass
         ohlc_db.publish_status(market, actual_last, len(tickers), actual_oldest, upload=upload)
 
-    logger.info(f"[OhlcCollector] {market.upper()} 증분 업데이트 완료")
+    logger.info(f"[OhlcCollector] {market.upper()} 수신 후보 게시 완료 (공통 관측 커서: {actual_last})")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1275,6 +1356,9 @@ def _enrich_us_marketcap(df: pd.DataFrame) -> pd.DataFrame:
     yf.Ticker(t).fast_info.market_cap으로 오늘 MarketCap 채우기.
     실패 시 NaN, 에러 로깅 후 계속. 종목당 0.1초 sleep.
     """
+    mask = pd.to_datetime(df["Date"]).dt.date == datetime.now(timezone.utc).date()
+    if not mask.any():
+        return df  # 현재 시총을 지난 세션의 값으로 소급하지 않는다.
     try:
         import yfinance as yf
     except ImportError:
@@ -1304,14 +1388,6 @@ def _enrich_us_marketcap(df: pd.DataFrame) -> pd.DataFrame:
             cap_map[t] = float("nan")
         time.sleep(0.1)
 
-    # 오늘 날짜 행에만 MarketCap 적용 (최신 날짜 기준)
-    today = date.today()
-    mask = df["Date"] == today
-    if not mask.any():
-        # 오늘 데이터가 없으면 max Date에 적용
-        max_date = df["Date"].max()
-        mask = df["Date"] == max_date
-
     df.loc[mask, "MarketCap"] = df.loc[mask, "Ticker"].map(cap_map)
 
     filled = mask.sum()
@@ -1327,6 +1403,9 @@ def _enrich_crypto_marketcap(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     if "MarketCap" not in df.columns:
         df["MarketCap"] = float("nan")
+    mask = pd.to_datetime(df["Date"]).dt.date == datetime.now(timezone.utc).date()
+    if not mask.any():
+        return df
 
     try:
         sess = requests.Session()
@@ -1360,13 +1439,6 @@ def _enrich_crypto_marketcap(df: pd.DataFrame) -> pd.DataFrame:
             cap_map[ticker_key] = float(mc) if mc is not None else float("nan")
 
         logger.info(f"[OhlcCollector] CMC MarketCap 수집: {len(cap_map)}종목")
-
-        # 최신 날짜 행에 적용
-        today = date.today()
-        mask = df["Date"] == today
-        if not mask.any():
-            max_date = df["Date"].max()
-            mask = df["Date"] == max_date
 
         df.loc[mask, "MarketCap"] = df.loc[mask, "Ticker"].map(cap_map)
         filled = mask.sum()
@@ -1436,16 +1508,31 @@ def collect_sector_meta(market: str) -> pd.DataFrame:
         ticker_iter = all_tickers
 
     rows = []
+    failed_fields = {}
     logger.info(f"[SectorMeta] US Sector/Industry 수집 시작: {len(all_tickers)}종목")
 
     for i, t in enumerate(ticker_iter, 1):
         sector, industry = "", ""
         try:
             info = yf.Ticker(t).info
-            sector   = info.get("sector",   "") or ""
-            industry = info.get("industry", "") or ""
-        except Exception as e:
-            logger.debug(f"[SectorMeta] {t} .info 실패: {e}")
+            if not isinstance(info, dict) or not info:
+                raise ValueError("sector_info_unverified")
+            failed = []
+            fields = {}
+            for source, target in [("sector", "Sector"), ("industry", "Industry")]:
+                value = info.get(source, "")
+                if value is None:
+                    value = ""
+                if not isinstance(value, str):
+                    failed.append(target)
+                    value = ""
+                fields[source] = value
+            sector, industry = fields["sector"], fields["industry"]
+            if failed:
+                failed_fields[t] = failed
+        except Exception:
+            failed_fields[t] = ["Sector", "Industry"]
+            logger.debug("[SectorMeta] info_unverified")
 
         rows.append({
             "Ticker":     t,
@@ -1460,5 +1547,6 @@ def collect_sector_meta(market: str) -> pd.DataFrame:
         time.sleep(0.15)
 
     df = pd.DataFrame(rows)
+    df.attrs["sector_failed_fields"] = failed_fields
     logger.info(f"[SectorMeta] US 메타 완료: {len(df)}종목")
     return df

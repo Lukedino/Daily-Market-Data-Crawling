@@ -233,10 +233,12 @@ def _is_row(nm, amount, add="", fs="CFS"):
 
 class TestCollectKrFinancials:
     def _setup(self, monkeypatch, tmp_path, tables, marcap):
-        from data import kr_financials_collector as kfc, financials_db, kr_db
+        from data import kr_financials_collector as kfc, financials_db, kr_db, kr_collector
         monkeypatch.setattr(financials_db, "_LOCAL_ROOT", tmp_path)
-        monkeypatch.setattr(kr_db, "download_year", lambda year, uploader=None: True)
-        monkeypatch.setattr(kr_db, "load_year", lambda year: marcap)
+        monkeypatch.setattr(kr_db, "ensure_year_baselines", lambda years, **kw: {y: "ok" for y in years})
+        monkeypatch.setattr(kr_db, "load_year", lambda year, strict=False: marcap if year == 2026 else marcap.iloc[:0])
+        marcap.attrs["krx_snapshot"] = {"version": 1, "provider": "fdr_krx_cache", "source_date": "2026-09-03"}
+        monkeypatch.setattr(kr_collector, "read_krx_snapshot", lambda: marcap)
         monkeypatch.setattr(kfc, "_SLEEP_SEC", 0)   # 테스트 무지연
         return kfc
 

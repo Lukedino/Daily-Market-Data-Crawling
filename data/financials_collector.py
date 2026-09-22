@@ -55,7 +55,7 @@ def _fetch_quarterly_financials(ticker: str) -> pd.DataFrame:
         cashflow_raw = yticker.quarterly_cashflow
 
     except Exception as e:
-        logger.warning(f"[FinancialsCollector] {ticker} yfinance 데이터 조회 실패: {e}")
+        logger.warning("[FinancialsCollector] financials_fetch_failed (%s)", type(e).__name__)
         return pd.DataFrame()
 
     # 공통 함수: raw DataFrame → {date: {field: value}} 매핑
@@ -172,7 +172,7 @@ def _fetch_ratios_snapshot(ticker: str, snap_date: date) -> dict:
     try:
         info = yf.Ticker(ticker).info or {}
     except Exception as e:
-        logger.debug(f"[FinancialsCollector] {ticker} info 조회 실패: {e}")
+        logger.debug("[FinancialsCollector] ratios_fetch_failed (%s)", type(e).__name__)
         info = {}
 
     return {
@@ -231,13 +231,13 @@ def collect_us_financials(
     except ImportError:
         _tqdm = None
 
-    if tickers is None:
-        tickers = load_tickers("us")
-
     # Drive 기존 파일 선다운로드 — absent(최초 실행)면 정상 진행, failed 면 덮어쓰기 방지를 위해 중단
     # (이 선다운로드가 없으면 save→upload 가 이번 실행분만으로 Drive 를 덮어쓴다 — 2026-09-01 결함 수정)
-    if upload:
-        financials_db.ensure_drive_baseline("us")
+    uploader = financials_db.ensure_drive_baseline("us") if upload else None
+    if not upload:
+        financials_db.ensure_local_baseline("us")
+    if tickers is None:
+        tickers = load_tickers("us")
 
     logger.info(f"[FinancialsCollector] US 재무 데이터 수집 시작: {len(tickers)}종목")
 
@@ -245,6 +245,24 @@ def collect_us_financials(
     fin_rows:   list[pd.DataFrame] = []
     ratio_rows: list[dict] = []
     failed: list[str] = []
+    published = {"financials": set(), "ratios": set()}
+
+    def _flush():
+        nonlocal fin_rows, ratio_rows
+        fin_years, ratio_years = [], []
+        # 게시 실패 전 수집한 두 종류를 모두 로컬에 보존한다.
+        if fin_rows:
+            fin_years = financials_db.save_financials(pd.concat(fin_rows, ignore_index=True), "us")
+        if ratio_rows:
+            ratio_years = financials_db.save_ratios(pd.DataFrame(ratio_rows), "us")
+        if upload:
+            if fin_years:
+                financials_db.upload_financials("us", fin_years, uploader=uploader)
+                published["financials"].update(fin_years)
+            if ratio_years:
+                financials_db.upload_ratios("us", ratio_years, uploader=uploader)
+                published["ratios"].update(ratio_years)
+        fin_rows, ratio_rows = [], []
 
     ticker_iter = _tqdm(tickers, desc="US Financials", unit="ticker") if _tqdm else tickers
 
@@ -255,7 +273,7 @@ def collect_us_financials(
             if not fin_df.empty:
                 fin_rows.append(fin_df)
         except Exception as e:
-            logger.warning(f"[FinancialsCollector] {ticker} financials 실패: {e}")
+            logger.warning("[FinancialsCollector] financials_fetch_failed (%s)", type(e).__name__)
             failed.append(ticker)
 
         # ── 재무비율 스냅샷 ───────────────────────────────────────────────
@@ -263,27 +281,13 @@ def collect_us_financials(
             ratio_dict = _fetch_ratios_snapshot(ticker, snap_date)
             ratio_rows.append(ratio_dict)
         except Exception as e:
-            logger.warning(f"[FinancialsCollector] {ticker} ratios 실패: {e}")
+            logger.warning("[FinancialsCollector] ratios_fetch_failed (%s)", type(e).__name__)
 
         time.sleep(0.5)
 
         # ── 10개마다 중간 저장 & 업로드 ───────────────────────────────────
         if idx % 10 == 0:
-            if fin_rows:
-                combined_fin = pd.concat(fin_rows, ignore_index=True)
-                financials_db.save_financials(combined_fin, "us")
-                if upload:
-                    years = sorted(combined_fin["PeriodDate"].apply(lambda d: d.year).unique())
-                    financials_db.upload_financials("us", list(years))
-                fin_rows = []
-
-            if ratio_rows:
-                ratio_df = pd.DataFrame(ratio_rows)
-                financials_db.save_ratios(ratio_df, "us")
-                if upload:
-                    years = sorted(ratio_df["SnapDate"].apply(lambda d: d.year).unique())
-                    financials_db.upload_ratios("us", list(years))
-                ratio_rows = []
+            _flush()
 
             logger.info(
                 f"[FinancialsCollector] 진행: {idx}/{len(tickers)} "
@@ -291,19 +295,9 @@ def collect_us_financials(
             )
 
     # ── 잔여 저장 ──────────────────────────────────────────────────────────
-    if fin_rows:
-        combined_fin = pd.concat(fin_rows, ignore_index=True)
-        financials_db.save_financials(combined_fin, "us")
-        if upload:
-            years = sorted(combined_fin["PeriodDate"].apply(lambda d: d.year).unique())
-            financials_db.upload_financials("us", list(years))
-
-    if ratio_rows:
-        ratio_df = pd.DataFrame(ratio_rows)
-        financials_db.save_ratios(ratio_df, "us")
-        if upload:
-            years = sorted(ratio_df["SnapDate"].apply(lambda d: d.year).unique())
-            financials_db.upload_ratios("us", list(years))
+    _flush()
+    if upload:
+        financials_db.publish_local_baseline("us", uploader=uploader, published=published)
 
     if failed:
         logger.warning(f"[FinancialsCollector] 실패 종목 ({len(failed)}개): {failed[:20]}")
@@ -350,8 +344,9 @@ def collect_crypto_ratios(
         _tqdm = None
 
     # Drive 기존 파일 선다운로드 — absent(최초 실행)면 정상 진행, failed 면 덮어쓰기 방지를 위해 중단
-    if upload:
-        financials_db.ensure_drive_baseline("crypto", kinds=("ratios",))
+    uploader = financials_db.ensure_drive_baseline("crypto", kinds=("ratios",)) if upload else None
+    if not upload:
+        financials_db.ensure_local_baseline("crypto", kinds=("ratios",))
 
     snap_date = date.today()
     logger.info(f"[FinancialsCollector] Crypto ratios 수집 시작 (CMC Top {_CMC_TOP_N})")
@@ -384,11 +379,10 @@ def collect_crypto_ratios(
             cmc_data = data.get("data", [])
         logger.info(f"[FinancialsCollector] CMC 수집: {len(cmc_data)}종목")
     except Exception as e:
-        logger.error(f"[FinancialsCollector] CMC API 호출 실패: {e}")
+        logger.error("[FinancialsCollector] crypto_fetch_failed (%s)", type(e).__name__)
 
     if not cmc_data:
-        logger.warning("[FinancialsCollector] CMC 데이터 없음 → 수집 종료")
-        return
+        raise financials_db.FinancialsStateError("financials_collection_empty")
 
     # ── tickers 필터링 ────────────────────────────────────────────────────
     target_set: Optional[set[str]] = None
@@ -464,8 +458,7 @@ def collect_crypto_ratios(
         rows.append(row)
 
     if not rows:
-        logger.warning("[FinancialsCollector] Crypto ratios 행 없음 → 저장 건너뜀")
-        return
+        raise financials_db.FinancialsStateError("financials_collection_empty")
 
     # ── yfinance fallback (Beta 등) ────────────────────────────────────────
     logger.info(f"[FinancialsCollector] yfinance fallback 시작: {len(rows)}종목")
@@ -491,14 +484,16 @@ def collect_crypto_ratios(
     except ImportError:
         logger.debug("[FinancialsCollector] yfinance 없음 → fallback 건너뜀")
     except Exception as e:
-        logger.warning(f"[FinancialsCollector] yfinance fallback 실패: {e}")
+        logger.warning("[FinancialsCollector] ratios_fallback_failed (%s)", type(e).__name__)
 
     # ── 저장 & 업로드 ─────────────────────────────────────────────────────
     ratio_df = pd.DataFrame(rows)
     financials_db.save_ratios(ratio_df, "crypto")
     if upload:
         years = sorted(ratio_df["SnapDate"].apply(lambda d: d.year).unique())
-        financials_db.upload_ratios("crypto", list(years))
+        financials_db.upload_ratios("crypto", list(years), uploader=uploader)
+        financials_db.publish_local_baseline("crypto", kinds=("ratios",), uploader=uploader,
+                                             published={"ratios": set(years)})
 
     logger.info(
         f"[FinancialsCollector] Crypto ratios 수집 완료: "

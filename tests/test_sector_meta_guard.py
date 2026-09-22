@@ -20,6 +20,8 @@ def _meta(tickers) -> pd.DataFrame:
         "Ticker": list(tickers),
         "Sector": ["Technology"] * len(tickers),
         "Industry": ["Software"] * len(tickers),
+        "Market": ["US"] * len(tickers),
+        "updated_at": ["2026-09-22T00:00:00"] * len(tickers),
     })
 
 
@@ -57,6 +59,7 @@ def test_allow_shrink_escape_hatch(db):
     assert pd.read_parquet(db.sector_meta_path("us"))["Ticker"].nunique() == 50
 
 
-def test_empty_df_is_skipped(db):
-    db.save_sector_meta(pd.DataFrame(), "us")
+def test_empty_df_is_explicit_failure(db):
+    with pytest.raises(db.DriveSyncError, match="sector_collection_empty"):
+        db.save_sector_meta(pd.DataFrame(), "us")
     assert not db.sector_meta_path("us").exists()

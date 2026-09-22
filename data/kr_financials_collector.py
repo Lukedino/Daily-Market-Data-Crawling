@@ -7,6 +7,7 @@ DART 주요계정 API(OpenDartReader.finstate)에서 보고서별 '누적' 손�
 결측은 절대 0으로 채우지 않는다(섹터리뷰 판정불가 원칙).
 """
 import logging
+import math
 from datetime import date
 from typing import Optional
 
@@ -86,18 +87,48 @@ def derive_quarters(cums: dict) -> dict:
 
 
 def build_universe(marcap_df: pd.DataFrame, top_n: int = 1000) -> pd.DataFrame:
-    """marcap 스냅샷 → 최신 Date의 시총 상위 N. 반환 [Code(6자리 str), Stocks]."""
+    """최신 유효 시총 스냅샷 상위 N. attrs에 원천 후보 날짜·종목 수를 남긴다.
+
+    이 함수만으로 원천의 최신 세션을 증명하지 않는다. 수집 호출자는 별도 확인한다.
+    """
     if marcap_df is None or marcap_df.empty or "Date" not in marcap_df.columns:
         return pd.DataFrame(columns=["Code", "Stocks"])
-    latest = marcap_df[marcap_df["Date"] == marcap_df["Date"].max()].copy()
+    from data.financials_db import FinancialsStateError
+    if not {"Code", "Marcap", "Stocks"}.issubset(marcap_df.columns):
+        raise FinancialsStateError("universe_unverified")
+    frame = marcap_df.copy()
+    try:
+        frame["Date"] = pd.to_datetime(frame["Date"], errors="raise")
+        if frame["Date"].isna().any() or frame["Date"].dt.tz is not None:
+            raise ValueError()
+    except Exception:
+        raise FinancialsStateError("universe_unverified") from None
+    for field in ("Marcap", "Stocks"):
+        if frame[field].map(lambda value: isinstance(value, bool)).any():
+            raise FinancialsStateError("universe_unverified")
+        frame[field] = pd.to_numeric(frame[field], errors="coerce")
+    # OHLC 전용 0/결측 행은 시총 스냅샷이 아니다.
+    valid = frame["Marcap"].map(lambda v: pd.notna(v) and math.isfinite(v) and v > 0)
+    if not valid.any():
+        return pd.DataFrame(columns=["Code", "Stocks"])
+    source_date = frame.loc[valid, "Date"].max()
+    latest = frame[frame["Date"] == source_date].copy()
     latest["Code"] = latest["Code"].astype(str).str.strip().str.zfill(6)
     # 보통주만 — KRX 종목코드 끝자리 0 = 보통주, 5/7/9 = 우선주, 영문 포함 = 특수코드.
     # 우선주·특수코드는 발행사 corp_code 가 없어 DART 조회가 매 실행 실패만 남긴다
     # (첫 수집 34종목 전부 이 부류, 2026-09-03). 시총 상위 N 도 보통주 기준으로 센다.
-    latest = latest[latest["Code"].str.fullmatch(r"\d{5}0")]
-    latest["Marcap"] = pd.to_numeric(latest["Marcap"], errors="coerce")
-    latest = latest.dropna(subset=["Marcap"]).sort_values("Marcap", ascending=False)
-    return latest.head(top_n)[["Code", "Stocks"]].reset_index(drop=True)
+    latest = latest[latest["Code"].str.fullmatch(r"[0-9]{5}0")]
+    if latest["Code"].duplicated().any():
+        raise FinancialsStateError("universe_unverified")
+    latest = latest[latest["Marcap"].map(lambda v: pd.notna(v) and math.isfinite(v) and v > 0)]
+    latest = latest.sort_values("Marcap", ascending=False).head(top_n)
+    # 시총 상위 N 중 주식 수 미확인 종목을 빼서 다른 유니버스로 바꾸지 않는다.
+    if not latest["Stocks"].map(lambda v: pd.notna(v) and math.isfinite(v) and v > 0).all():
+        raise FinancialsStateError("universe_unverified")
+    result = latest[["Code", "Stocks"]].reset_index(drop=True)
+    result.attrs.update(source_date=source_date.date(),
+                        latest_known_date=frame["Date"].max().date(), valid_count=len(result))
+    return result
 
 
 def compute_eps(net_income, stocks) -> Optional[float]:
@@ -189,6 +220,32 @@ def _fetch_report(dart, code: str, year: int, reprt_code: str):
     return df
 
 
+def _load_verified_universe(top_n, snap, *, upload, uploader=None):
+    """연도 기준본 전체 확인 → 유효 시총 날짜 → 동일 원천 최신 날짜 대조."""
+    from data import financials_db, kr_db
+    from data.kr_collector import read_krx_snapshot, snapshot_source_date
+
+    years = [snap.year - 1, snap.year]
+    try:
+        states = kr_db.ensure_year_baselines(years, download=upload, uploader=uploader)
+        if any(states.get(y) not in {"ok", "absent"} for y in years):
+            raise ValueError()
+        frames = [kr_db.load_year(y, strict=True) for y in years]
+        populated = [f for f in frames if not f.empty]
+        universe = build_universe(pd.concat(populated, ignore_index=True), top_n) if populated else pd.DataFrame()
+        source_date = universe.attrs.get("source_date")
+        # 전년도 기준만 있는 연초는 오래된 Stocks의 허용 정책을 새로 추정하지 않는다.
+        if (universe.empty or source_date is None or source_date.year != snap.year
+                or source_date > snap or universe.attrs["latest_known_date"] != source_date):
+            raise ValueError()
+        observed = read_krx_snapshot()
+        if snapshot_source_date(observed) != source_date:
+            raise ValueError()
+        return universe
+    except Exception:
+        raise financials_db.FinancialsStateError("universe_unverified") from None
+
+
 def collect_kr_financials(top_n: int = 1000, upload: bool = True,
                           dart=None, years: list | None = None,
                           today: date | None = None):
@@ -209,22 +266,13 @@ def collect_kr_financials(top_n: int = 1000, upload: bool = True,
     except ImportError:
         _tqdm = None
 
-    this_year = _date.today().year
-    years = years or [this_year - 1, this_year]
-
-    # ── 유니버스 ──
-    uni_year = this_year
-    kr_db.download_year(uni_year)
-    marcap = kr_db.load_year(uni_year)
-    universe = build_universe(marcap, top_n)
-    if universe.empty:
-        logger.error("[KrFinancials] marcap 유니버스 비어있음 — 중단")
-        return
-    stocks_map = dict(zip(universe["Code"], universe["Stocks"]))
+    snap = today or _date.today()
+    years = years or [snap.year - 1, snap.year]
 
     # ── Drive 베이스라인 (kr financials만) ──
-    if upload:
-        financials_db.ensure_drive_baseline("kr", kinds=("financials",))
+    uploader = financials_db.ensure_drive_baseline("kr", kinds=("financials",)) if upload else None
+    if not upload:
+        financials_db.ensure_local_baseline("kr", kinds=("financials",))
 
     # ── 기존 저장 분기 (증분 스킵 기준) ──
     existing: dict[str, set] = {}
@@ -235,16 +283,24 @@ def collect_kr_financials(top_n: int = 1000, upload: bool = True,
         for _, r in df_y.iterrows():
             existing.setdefault(str(r["Ticker"]).zfill(6), set()).add((int(r["Year"]), int(r["Quarter"])))
 
-    if dart is None:
-        dart = _get_dart()
-
-    snap = today or _date.today()
+    universe = _load_verified_universe(top_n, snap, upload=upload, uploader=uploader)
+    stocks_map = dict(zip(universe["Code"], universe["Stocks"]))
+    logger.info("[KrFinancials] source_date=%s valid_count=%d",
+                universe.attrs["source_date"], universe.attrs["valid_count"])
     targets = {y: target_quarters(y, snap) for y in years}
     for y in years:
         logger.info(f"[KrFinancials] {y}년 목표 분기 {sorted(targets[y]) or '없음'} (공시 기한 기준 {snap})")
     rows: list[dict] = []
     failed: list[str] = []
+    published = set()
     codes = list(universe["Code"])
+    if dart is None and any(required_reports(
+            {q for yy, q in existing.get(code, set()) if yy == y}, targets[y])
+            for code in codes for y in years):
+        try:
+            dart = _get_dart()
+        except Exception:
+            raise financials_db.FinancialsStateError("financials_dart_unavailable") from None
     it = _tqdm(codes, desc="KR Financials", unit="종목") if _tqdm else codes
 
     def _flush():
@@ -255,7 +311,8 @@ def collect_kr_financials(top_n: int = 1000, upload: bool = True,
         financials_db.save_financials(df, "kr")
         if upload:
             ys = sorted({r["Year"] for r in rows})
-            financials_db.upload_financials("kr", ys)
+            financials_db.upload_financials("kr", ys, uploader=uploader)
+            published.update(ys)
         rows = []
 
     for idx, code in enumerate(it, start=1):
@@ -287,7 +344,7 @@ def collect_kr_financials(top_n: int = 1000, upload: bool = True,
                         "SnapDate": snap,
                     })
         except Exception as e:
-            logger.warning(f"[KrFinancials] {code} 실패 — 스킵: {type(e).__name__}: {e}")
+            logger.warning("[KrFinancials] financials_fetch_failed (%s)", type(e).__name__)
             failed.append(code)
 
         if idx % 50 == 0:
@@ -295,6 +352,9 @@ def collect_kr_financials(top_n: int = 1000, upload: bool = True,
             logger.info(f"[KrFinancials] 진행 {idx}/{len(codes)}")
 
     _flush()
+    if upload:
+        financials_db.publish_local_baseline("kr", kinds=("financials",), uploader=uploader,
+                                             published={"financials": published})
     if failed:
         logger.warning(f"[KrFinancials] 실패 {len(failed)}종목: {failed[:20]}")
     logger.info(f"[KrFinancials] 완료: {len(codes) - len(failed)}/{len(codes)}종목")
@@ -307,3 +367,5 @@ def collect_kr_financials(top_n: int = 1000, upload: bool = True,
             f"[KrFinancials] 실패율 과다({len(failed)}/{len(codes)}) — "
             f"수집 파이프라인 자체 결함 가능성. 워크플로우를 실패로 종료한다"
         )
+    return {"source_date": universe.attrs["source_date"].isoformat(),
+            "valid_count": len(codes), "failed_count": len(failed)}

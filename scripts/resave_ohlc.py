@@ -20,7 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s - %(message)s")
+from data.execution_safety import writer_lock, configure_logging, cli_entry
 logger = logging.getLogger("resave_ohlc")
 
 
@@ -31,6 +31,11 @@ def main() -> int:
     ap.add_argument("--upload", action="store_true", help="검증 통과 시 Drive 업로드")
     args = ap.parse_args()
 
+    with writer_lock():
+        return resave(args)
+
+
+def resave(args):
     from data import ohlc_db
 
     ohlc_db.download_all_years(args.market)
@@ -39,16 +44,23 @@ def main() -> int:
         if p.stem.split("_")[-1].isdigit()
     )
 
+    if not years:
+        raise ohlc_db.DriveSyncError("resave_files_absent")
+    baselines = {}
+    for year in years:
+        if not ohlc_db.local_path(args.market, year).is_file():
+            raise ohlc_db.DriveSyncError("resave_requested_file_absent")
+        baselines[year] = ohlc_db.load_year(args.market, year, strict=True)
     rows = []
     for y in years:
-        before = ohlc_db.load_year(args.market, y)
+        before = baselines[y]
         if before.empty:
             logger.info(f"{args.market}_{y}: 비어 있음 → 건너뜀")
             continue
         b_bad = ohlc_db.check_coverage_continuity(before)["n_bad"]
         # 자기 자신과 병합 → 중복 제거 → (US) 휴장일 행 제거 → 축소 가드 → 연속성 게이트 → 기록
         ohlc_db.save_year(before, args.market, y)
-        after = ohlc_db.load_year(args.market, y)
+        after = ohlc_db.load_year(args.market, y, strict=True)
         a_bad = ohlc_db.check_coverage_continuity(after)["n_bad"]
         rows.append((y, len(before), b_bad, len(after), a_bad,
                      after["Ticker"].nunique(), str(after["Date"].max())))
@@ -62,10 +74,13 @@ def main() -> int:
         logger.error(f"재저장 후에도 급감일이 남음: {remaining} → 업로드하지 않음")
         return 1
     if args.upload:
-        ohlc_db.upload_years(args.market, [r[0] for r in rows])
+        failed = ohlc_db.upload_years(args.market, [r[0] for r in rows])
+        if failed:
+            raise ohlc_db.DriveSyncError("resave_publication_failed")
         logger.info(f"Drive 업로드 완료: {args.market} {[r[0] for r in rows]}")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    configure_logging()
+    sys.exit(cli_entry(main))

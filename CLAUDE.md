@@ -114,16 +114,15 @@ Market | MarketId | Rank | Date
 ```
 
 **수집 전략:**
-- `[daily]` FinanceDataReader StockListing × KOSPI + KOSDAQ + KONEX
-  - 당일 스냅샷: OHLCV + Marcap + Rank + Market 포함
+- `[daily]` 고정 FDR 공급 경로의 날짜 선택 1회 → 같은 날짜 CSV 1회 → 세 시장 분리
+  - 원천 세션 날짜의 스냅샷: OHLCV + Marcap + Rank + Market 포함 (요청 당일로 재표기하지 않음)
   - Rank = 시장 내 시총 기준 내림차순
 - `[backfill]` yfinance .KS/.KQ 배치 수집 (100종목씩)
   - 과거 OHLCV만 (Marcap/Rank = NaN)
   - pykrx 전종목 엔드포인트는 GHA 환경에서 차단됨 → yfinance 우회
-- `[daily 폴백]` FDR이 0건이면 기존 parquet 유니버스 + yfinance로 당일 전종목 수집
-  - ⚠️ FDR `StockListing`은 KRX가 아니라 제3자 GitHub 캐시 저장소의 **날짜별 CSV**를 읽는다.
-    상류가 그날치를 안 올리면 세 시장 전부 404다 (2026-09-08 실제 사고)
-  - 폴백으로 받은 날은 `Marcap`/`Rank`가 비어 있다 — 시총 기반 소비처는 이 점을 감안할 것
+- `[daily 폴백·backfill]` Yahoo adjusted 후보와 FDR 기준의 일치를 입증하지 못하면 저장·게시를 보류한다.
+  - 원천 날짜/응답 실패도 명시 오류다. FDR 장애를 새 날짜·정상 빈 결과로 변환하지 않는다.
+  - 과거 가격의 raw/adjusted 정책·일괄 재작성은 이번 결함 수정에 포함하지 않는다. [현재 경계](docs/2026-09-22-data-preservation.md)를 따른다.
 
 **주요 파일:**
 - `data/kr_collector.py` — FDR daily + yfinance backfill 수집 로직
@@ -246,3 +245,13 @@ python scripts/verify_kr.py --drive --fix
 | 2026-04-03 | 자동 갭 보정 로직 main.py run_kr_daily()에 추가 |
 | 2026-04-04 | sector-meta 추가: US/Crypto Sector/Industry/Market 태그 주 1회 수집 (sector-meta.yml) |
 | 2026-04-04 | ohlc_collector.collect_sector_meta(), ohlc_db.save/upload/download_sector_meta() 추가 |
+
+
+### 2026-09-22 잔여 보존·실행 경계
+
+- 재무 strict/atomic 저장·기준본 staging·게시 실패 전파와 KR 시총 유니버스 원천 날짜 검증을 적용했다.
+- 증분 실패/빈 응답/누락·가격 기준 변경은 커서 전진 전 보류한다. 시총 결측은 이전 값을 보존하며 현재 시총을 과거 봉에 복사하지 않는다.
+- sector는 기준본을 확인하고 실패한 관측 필드와 시각을 보존한다. 원본 없는 실패는 보류하고 실패 업로드를 완료로 보고하지 않는다.
+- Drive는 read-only 조회/완전 pagination/중복·경로 검증/staging을 사용한다. 기존 슬롯 update와 유효한 0행 placeholder 계약을 유지한다.
+- 모든 수집 mode의 dry-run은 수집·다운로드·데이터 저장·게시 0회다. main과 수동 writer는 같은 LOCAL_DATA_DIR의 OS 잠금으로 배타 실행한다. 다른 머신과의 분산 잠금은 아니다.
+- 공개 수집 로그는 소스·줄·고정 코드로 제한하고 원문 예외·인수·Python progress 출력을 게시하지 않는다. 자세한 보류 원인·한계·운영 확인은 [수집·게시 보존 계약](docs/2026-09-22-data-preservation.md)을 본다.

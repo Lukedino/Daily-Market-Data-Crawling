@@ -75,6 +75,76 @@ def test_failed_upload_does_not_advance_the_cursor(harness):
     assert calls["update_status"] == 0 and calls["upload_status"] == 0   # 다음 실행이 같은 날을 다시 수집
 
 
+@pytest.mark.parametrize("fault", ["reported", "silent", "empty", "exception"])
+def test_one_of_hundred_incomplete_keeps_all_writes_and_cursor_untouched(harness, fault):
+    calls, monkeypatch = harness
+    tickers = [f"T{i:03}" for i in range(100)]
+    monkeypatch.setattr(ohlc_db, "download_year_state", lambda *a, **k: "ok")
+    rows = pd.concat([_new_rows().assign(Ticker=t) for t in tickers[:99]], ignore_index=True)
+    if fault == "exception":
+        def collect(*a, **k):
+            raise OSError("SYNTHETIC_SECRET")
+    else:
+        collect = lambda *a, **k: (pd.DataFrame() if fault == "empty" else rows,
+                                    [tickers[-1]] if fault == "reported" else [])
+    monkeypatch.setattr(oc, "fetch_ohlc_range", collect)
+    with pytest.raises(oc.CollectionIncompleteError) as caught:
+        oc.update_market("us", tickers=tickers, upload=True)
+    assert "SYNTHETIC_SECRET" not in str(caught.value)
+    assert calls == {"append": 0, "upload_years": 0, "update_status": 0, "upload_status": 0}
+
+
+def test_lagging_foreign_calendar_does_not_publish_the_other_tickers_maximum(harness):
+    calls, monkeypatch = harness
+    old = date.today() - timedelta(days=3)
+    newer = date.today() - timedelta(days=1)
+    frame = pd.concat([_new_rows().assign(Ticker="AAA", Date=newer),
+                       _new_rows().assign(Ticker="U-UN.TO", Date=old)], ignore_index=True)
+    monkeypatch.setattr(ohlc_db, "download_year_state", lambda *a, **k: "ok")
+    monkeypatch.setattr(oc, "fetch_ohlc_range", lambda *a, **k: (frame, []))
+    cursors = []
+    monkeypatch.setattr(ohlc_db, "publish_status", lambda market, last, *a, **k: cursors.append(last))
+    oc.update_market("us", tickers=["AAA", "U-UN.TO"], upload=True)
+    assert cursors == [old] and calls["append"] == 1
+
+
+def test_same_calendar_internal_hole_is_unverified_not_holiday_or_delisting():
+    frame = pd.DataFrame({"Ticker": ["AAA"] * 3 + ["BBB"] * 2,
+                          "Date": [date(2026, 1, n) for n in (5, 6, 7, 5, 7)]})
+    with pytest.raises(oc.CollectionIncompleteError, match="session_unverified"):
+        oc._incremental_cursor(frame, ["AAA", "BBB"], [], date(2026, 1, 5), "us")
+
+
+def test_year_end_incomplete_retries_the_same_cursor_then_advances(tmp_path, monkeypatch):
+    class Clock(date):
+        @classmethod
+        def today(cls):
+            return cls(2027, 1, 2)
+    monkeypatch.setattr(oc, "date", Clock)
+    monkeypatch.setattr(ohlc_db, "_LOCAL_ROOT", tmp_path)
+    monkeypatch.setattr(ohlc_db, "_STATUS_PATH", tmp_path / "status.json")
+    monkeypatch.setattr(ohlc_db, "_PENDING_PATH", tmp_path / "pending.json")
+    monkeypatch.setattr(oc, "build_symbol_overrides", lambda *a: {})
+    monkeypatch.setattr(oc, "_enrich_us_marketcap", lambda frame: frame)
+    ohlc_db.save_status({"us": {"last_updated": "2026-12-31"}})
+    before = ohlc_db._STATUS_PATH.read_bytes()
+    starts, complete = [], [False]
+    def collect(tickers, start, end, **kwargs):
+        starts.append(start)
+        result = pd.concat([_new_rows().assign(Ticker=t, Date=date(2027, 1, 2))
+                            for t in (tickers if complete[0] else tickers[:1])], ignore_index=True)
+        return result, [] if complete[0] else [tickers[-1]]
+    monkeypatch.setattr(oc, "fetch_ohlc_range", collect)
+    with pytest.raises(oc.CollectionIncompleteError):
+        oc.update_market("us", ["AAA", "BBB"], upload=False)
+    assert ohlc_db._STATUS_PATH.read_bytes() == before
+    assert not ohlc_db.local_path("us", 2027).exists()
+    complete[0] = True
+    oc.update_market("us", ["AAA", "BBB"], upload=False)
+    assert starts == ["2026-12-31", "2026-12-31"]
+    assert ohlc_db.load_status()["us"]["last_updated"] == "2027-01-02"
+
+
 def test_upload_years_reports_which_files_failed(tmp_path, monkeypatch):
     monkeypatch.setattr(ohlc_db, "_LOCAL_ROOT", tmp_path / "ohlc_db")
     for year in (2025, 2026):
@@ -88,8 +158,51 @@ def test_upload_years_reports_which_files_failed(tmp_path, monkeypatch):
         def upload(self, local, remote):
             if "2026" in Path(local).name:
                 raise OSError("503")
+            return True
     monkeypatch.setitem(ohlc_db.config.DRIVE_PATHS, "ohlc_us", "data/ohlc/us")
     assert ohlc_db.upload_years("us", [2025, 2026], uploader=Uploader()) == ["us_2026.parquet"]
+
+
+@pytest.mark.parametrize("receipt,success", [(None, False), ("", False), ("  ", False),
+                                            (False, False), (0, False), (1, False),
+                                            ({"id": "fake"}, False), (True, True),
+                                            ("synthetic-file-id", True)])
+def test_upload_requires_explicit_receipt_for_year_and_metadata(tmp_path, monkeypatch, receipt, success):
+    monkeypatch.setattr(ohlc_db, "_LOCAL_ROOT", tmp_path)
+    path = ohlc_db.local_path("us", 2026)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _new_rows().assign(Date=date(2026, 1, 2)).to_parquet(path, index=False)
+    metadata = tmp_path / "status.json"
+    metadata.write_text("{}", encoding="utf-8")
+    monkeypatch.setitem(ohlc_db.config.DRIVE_PATHS, "ohlc_us", "synthetic/us")
+    monkeypatch.setitem(ohlc_db.config.DRIVE_PATHS, "ohlc_meta", "synthetic/meta")
+    uploader = SimpleNamespace(upload=lambda *a: receipt)
+    assert ohlc_db.upload_years("us", [2026], uploader) == ([] if success else ["us_2026.parquet"])
+    if success:
+        assert ohlc_db._upload_metadata(metadata, uploader) is True
+    else:
+        with pytest.raises(ohlc_db.DriveSyncError):
+            ohlc_db._upload_metadata(metadata, uploader)
+
+
+@pytest.mark.parametrize("fault", ["mismatch", "actions"])
+def test_unverified_basis_stops_before_save_upload_and_cursor(harness, fault):
+    calls, monkeypatch = harness
+    monkeypatch.setattr(ohlc_db, "download_year_state", lambda *a, **k: "absent")
+    original = _new_rows()
+    ohlc_db.save_year(original, "us", date.today().year)
+    path = ohlc_db.local_path("us", date.today().year)
+    before = path.read_bytes()
+    candidate = original.copy()
+    if fault == "mismatch":
+        candidate["Close"] = 2.
+    else:
+        candidate.attrs["ohlc_request"] = {"actions_complete": True, "action_tickers": ["AAA"]}
+    monkeypatch.setattr(oc, "fetch_ohlc_range", lambda *a, **k: (candidate, []))
+    with pytest.raises(ohlc_db.PriceBasisError):
+        oc.update_market("us", upload=True)
+    assert path.read_bytes() == before
+    assert calls == {"append": 0, "upload_years": 0, "update_status": 0, "upload_status": 0}
 
 
 # ── KR 일별: 같은 불변식. KR 은 Marcap·Rank 과거값을 다시 받을 길이 없어 더 나쁘다 ──────────
@@ -118,6 +231,7 @@ class _Uploader:
     def upload(self, local, remote):
         if isinstance(self._upload, Exception):
             raise self._upload
+        return True
 
 
 @pytest.fixture

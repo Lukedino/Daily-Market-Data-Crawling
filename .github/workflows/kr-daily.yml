@@ -71,5 +71,5 @@ jobs:
             echo "텔레그램 시크릿 미설정 - 실패 알림 생략"
             exit 0
           fi
-          MSG="🚨 KR Daily 수집 실패 — 오늘 한국 시세가 갱신되지 않았습니다. FDR StockListing과 yfinance 폴백이 모두 0건이거나 실행 자체가 죽었습니다. 하류 영향: KIS EOD 분석이 오늘 신호를 만들지 못합니다(직전 신호 유지). 로그: ${RUN_URL}"
+          MSG="🚨 KR Daily 수집·검증·게시 중 실패 또는 보류가 발생했습니다. 직전 정상본을 유지하며 원천 날짜·가격 기준·기준본·게시 결과의 고정 오류 코드를 확인하세요. 하류는 최신 입력 확인이 필요합니다. 로그: ${RUN_URL}"
           curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" --data-urlencode "text=${MSG}" > /dev/null

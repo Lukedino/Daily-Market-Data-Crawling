@@ -27,7 +27,14 @@ class StubUploader:
 
     def download_all_state(self, remote_subfolder, local_dir, extensions=(".parquet",)):
         self.calls.append((remote_subfolder, local_dir))
-        return self.states.get(remote_subfolder, "absent")
+        state = self.states.get(remote_subfolder, "absent")
+        if state == "ok":
+            from data import financials_db
+            market, kind = remote_subfolder.split("/")
+            # ok는 검증 가능한 파일을 실제로 staging에 내려받았다는 뜻이다.
+            pd.DataFrame(columns=financials_db._columns(kind)).to_parquet(
+                Path(local_dir) / f"{market}_{kind}_2026.parquet", index=False)
+        return state
 
 
 @pytest.fixture
@@ -63,10 +70,11 @@ def test_baseline_failed_raises(fdb):
         fdb.ensure_drive_baseline("us", uploader=u)
 
 
-def test_baseline_no_uploader_is_safe_skip(fdb, monkeypatch):
-    """uploader 초기화 실패 시 upload_*() 도 전부 건너뛰므로 Drive 가 안전 — 중단하지 않는다."""
+def test_baseline_no_uploader_is_explicit_failure(fdb, monkeypatch):
+    """게시 요청에서 client 부재는 성공이 아니며 수집 전에 중단한다."""
     monkeypatch.setattr(fdb, "_get_uploader", lambda uploader=None: None)
-    fdb.ensure_drive_baseline("us")                      # 예외 없이 통과해야 함
+    with pytest.raises(fdb.FinancialsStateError, match="uploader_unavailable"):
+        fdb.ensure_drive_baseline("us")
 
 
 # ── 회귀 재현 — 베이스라인 파일이 있으면 스냅샷이 누적된다 ─────────
@@ -119,7 +127,8 @@ def test_collector_crypto_calls_baseline(monkeypatch):
         assert calls == [("crypto", ("ratios",))]
         raise requests.ConnectionError("synthetic CMC outage")
     monkeypatch.setattr(requests.Session, "get", unavailable)
-    financials_collector.collect_crypto_ratios(tickers=[], upload=True)
+    with pytest.raises(financials_db.FinancialsStateError, match="collection_empty"):
+        financials_collector.collect_crypto_ratios(tickers=[], upload=True)
     assert calls == [("crypto", ("ratios",))]
 
 
@@ -134,6 +143,7 @@ class _UploadRecordingUploader:
 
     def upload(self, local, remote):
         self.uploaded.append(remote)
+        return True
 
 
 def test_baseline_kr_financials_uses_kr_drive_path(fdb):
@@ -147,7 +157,7 @@ def test_upload_financials_kr_drive_path(fdb):
     """upload_financials('kr', ...)가 kr/financials 원격 경로를 쓴다."""
     p = fdb.local_financials_path("kr", 2026)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_bytes(b"x")
+    pd.DataFrame(columns=fdb._FINANCIALS_COLS).to_parquet(p, index=False)
 
     u = _UploadRecordingUploader()
     fdb.upload_financials("kr", [2026], uploader=u)
@@ -160,17 +170,19 @@ def test_upload_financials_kr_drive_path(fdb):
 def _kr_baseline_setup(monkeypatch, tmp_path):
     """collect_kr_financials가 실제 I/O 없이 돌게 하는 공통 스텁 (financials_db._LOCAL_ROOT
     격리 + kr_db.download_year/load_year 1종목 marcap 스텁 + upload_financials no-op)."""
-    from data import financials_db, kr_db
+    from data import financials_db, kr_db, kr_collector
 
     monkeypatch.setattr(financials_db, "_LOCAL_ROOT", tmp_path / "ohlc_db")
     monkeypatch.setattr(financials_db, "upload_financials", lambda *a, **k: None)
-    monkeypatch.setattr(kr_db, "download_year", lambda year, uploader=None: True)
+    monkeypatch.setattr(kr_db, "ensure_year_baselines", lambda years, **kw: {y: "ok" for y in years})
     from datetime import date as _d
     marcap = pd.DataFrame({
         "Code": ["005930"], "Marcap": [500], "Stocks": [100],
         "Date": [_d(2026, 9, 3)],
     })
-    monkeypatch.setattr(kr_db, "load_year", lambda year: marcap)
+    monkeypatch.setattr(kr_db, "load_year", lambda year, strict=False: marcap if year == 2026 else marcap.iloc[:0])
+    marcap.attrs["krx_snapshot"] = {"version": 1, "provider": "fdr_krx_cache", "source_date": "2026-09-03"}
+    monkeypatch.setattr(kr_collector, "read_krx_snapshot", lambda: marcap)
 
 
 class _EmptyDart:

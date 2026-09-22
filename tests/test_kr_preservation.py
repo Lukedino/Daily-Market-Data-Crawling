@@ -46,6 +46,7 @@ class FakeDrive:
         if self.fail_upload:
             raise OSError("synthetic upload failure")
         self.uploaded.append(pd.read_parquet(local))
+        return True
 
 
 @pytest.fixture
@@ -66,6 +67,9 @@ def args(**kwargs):
 
 def setup_run(db, monkeypatch, collected, drive):
     monkeypatch.setattr(db, "_get_uploader", lambda uploader=None: uploader or drive)
+    # These tests isolate preservation downstream of a separately verified
+    # collector. Real unverified Yahoo candidates are covered in manual_writers.
+    monkeypatch.setattr(kr_collector, "validate_price_basis", lambda frame: None)
 
     def collect(*a, **k):
         drive.events.append(("collect",))
@@ -361,6 +365,7 @@ def test_daily_checks_remote_even_with_local_baseline(db, monkeypatch):
 
 
 def test_daily_upload_failure_does_not_advance_status(db, monkeypatch):
+    monkeypatch.setattr(kr_collector, "validate_price_basis", lambda frame: None)
     today = date.today()
     baseline = rows(("000001", today - timedelta(days=1)))
     drive = FakeDrive({today.year: baseline}, fail_upload=True)
@@ -375,6 +380,7 @@ def test_daily_upload_failure_does_not_advance_status(db, monkeypatch):
 
 
 def test_daily_retry_keeps_local_only_snapshot_instead_of_ohlc_reconstruction(db, monkeypatch):
+    monkeypatch.setattr(kr_collector, "validate_price_basis", lambda frame: None)
     today = date.today()
     year_start = today.replace(month=1, day=1)
     local_day = max(year_start, today - timedelta(days=1))

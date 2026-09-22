@@ -20,6 +20,8 @@ data/drive_uploader.py — Google Drive 업로드/다운로드
 
 import logging
 import os
+import re
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Optional
@@ -32,6 +34,24 @@ SCOPES = ["https://www.googleapis.com/auth/drive"]
 MIME_PARQUET = "application/octet-stream"
 MIME_JSON    = "application/json"
 MIME_FOLDER  = "application/vnd.google-apps.folder"
+
+
+class DriveStateError(RuntimeError):
+    """Fixed-code failures; provider exception text must not enter public logs."""
+
+
+def _safe_name(value: str) -> str:
+    if (not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,199}", value)
+            or value.endswith((".", " ")) or ".." in value
+            or value.split(".")[0].upper() in {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}):
+        raise DriveStateError("drive_name_invalid")
+    return value
+
+
+def _safe_id(value: str) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", value):
+        raise DriveStateError("drive_id_invalid")
+    return value
 
 
 class DriveUploader:
@@ -84,10 +104,7 @@ class DriveUploader:
 
         creds_path = config.GDRIVE_CREDS_PATH
         if not Path(creds_path).exists():
-            raise FileNotFoundError(
-                f"Google 자격증명 파일이 없습니다.\n"
-                f"GOOGLE_SERVICE_ACCOUNT_JSON 환경변수 또는 파일: {creds_path}"
-            )
+            raise FileNotFoundError("drive_credentials_absent")
 
         creds = service_account.Credentials.from_service_account_file(
             creds_path, scopes=SCOPES
@@ -96,262 +113,238 @@ class DriveUploader:
         logger.info("[Drive] Service Account (file) 인증 사용")
         return self._service
 
-    # ── 폴더 탐색 & 생성 ───────────────────────────────────────────────────────
-
-    def _get_or_create_folder(self, path: str, parent_id: Optional[str] = None) -> str:
-        """
-        중첩 경로(예: "data/market")를 루트 폴더 하위에 자동 생성.
-        존재하면 ID 반환, 없으면 생성 후 ID 반환.
-        """
-        if parent_id is None:
-            parent_id = self._root_folder_id
-
-        cache_key = f"{parent_id}/{path}"
-        if cache_key in self._folder_cache:
-            return self._folder_cache[cache_key]
-
+    def _list(self, query: str) -> list[dict]:
+        """A complete listing is required before absence or uniqueness is known."""
         service = self._get_service()
-        parts = [p for p in path.split("/") if p]
-        current_parent = parent_id
+        result, seen_ids, seen_tokens = [], set(), set()
+        token = None
+        for _ in range(1000):
+            kwargs = dict(q=query, fields="nextPageToken,incompleteSearch,files(id,name,mimeType)",
+                          spaces="drive", supportsAllDrives=True, includeItemsFromAllDrives=True,
+                          pageSize=1000)
+            if token:
+                kwargs["pageToken"] = token
+            response = service.files().list(**kwargs).execute()
+            if (not isinstance(response, dict) or response.get("incompleteSearch", False) is not False
+                    or not isinstance(response.get("files"), list)):
+                raise DriveStateError("drive_listing_incomplete")
+            for item in response["files"]:
+                if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+                    raise DriveStateError("drive_listing_invalid")
+                identity = _safe_id(item.get("id"))
+                if identity in seen_ids:
+                    raise DriveStateError("drive_listing_duplicate")
+                seen_ids.add(identity)
+                result.append(item)
+            token = response.get("nextPageToken")
+            if token is None:
+                return result
+            if not isinstance(token, str) or not token or token in seen_tokens:
+                raise DriveStateError("drive_pagination_invalid")
+            seen_tokens.add(token)
+        raise DriveStateError("drive_listing_limit")
 
+    def _resolve_folder(self, path: str, parent_id=None, *, create=False):
+        current = _safe_id(parent_id or self._root_folder_id)
+        if not isinstance(path, str):
+            raise DriveStateError("drive_path_invalid")
+        parts = path.split("/") if path else []
         for part in parts:
-            # 이미 있는지 검색
-            resp = service.files().list(
-                q=(f"name='{part}' and mimeType='{MIME_FOLDER}' "
-                   f"and '{current_parent}' in parents and trashed=false"),
-                fields="files(id, name)",
-                spaces="drive",
-                supportsAllDrives=True,
-                includeItemsFromAllDrives=True,
-            ).execute()
-            files = resp.get("files", [])
-
+            _safe_name(part)
+            files = self._list(f"name='{part}' and mimeType='{MIME_FOLDER}' and '{current}' in parents and trashed=false")
+            if len(files) > 1 or any(item["name"] != part for item in files):
+                raise DriveStateError("drive_folder_ambiguous")
             if files:
-                current_parent = files[0]["id"]
+                current = _safe_id(files[0]["id"])
+            elif not create:
+                return None
             else:
-                # 없으면 생성
-                folder = service.files().create(
-                    body={"name": part, "mimeType": MIME_FOLDER,
-                          "parents": [current_parent]},
-                    fields="id",
-                    supportsAllDrives=True,
-                ).execute()
-                current_parent = folder["id"]
-                logger.debug(f"[Drive] 폴더 생성: {part} (id={current_parent})")
+                response = self._get_service().files().create(
+                    body={"name": part, "mimeType": MIME_FOLDER, "parents": [current]},
+                    fields="id", supportsAllDrives=True).execute()
+                current = _safe_id(response.get("id"))
+        return current
 
-        self._folder_cache[cache_key] = current_parent
-        return current_parent
+    def _lookup_folder(self, path: str, parent_id=None):
+        return self._resolve_folder(path, parent_id, create=False)
 
-    def _find_file(self, folder_id: str, filename: str) -> Optional[str]:
-        """폴더 내 파일 ID 검색. 없으면 None."""
-        service = self._get_service()
-        resp = service.files().list(
-            q=(f"name='{filename}' and '{folder_id}' in parents and trashed=false"),
-            fields="files(id, name)",
-            spaces="drive",
-            supportsAllDrives=True,
-            includeItemsFromAllDrives=True,
-        ).execute()
-        files = resp.get("files", [])
+    def _get_or_create_folder(self, path: str, parent_id=None):
+        return self._resolve_folder(path, parent_id, create=True)
+
+    def _find_file(self, folder_id: str, filename: str):
+        _safe_id(folder_id)
+        _safe_name(filename)
+        files = self._list(f"name='{filename}' and '{folder_id}' in parents and trashed=false")
+        if len(files) > 1 or any(item["name"] != filename or item.get("mimeType") == MIME_FOLDER for item in files):
+            raise DriveStateError("drive_file_ambiguous")
         return files[0]["id"] if files else None
 
-    # ── 업로드 ─────────────────────────────────────────────────────────────────
-
     def upload(self, local_path: str, remote_subfolder: str) -> str:
-        """
-        로컬 파일을 Drive의 remote_subfolder에 업로드.
-        기존 파일 있으면 update, 없으면 create.
-        대용량 파일 안전을 위해 resumable=True 사용.
-
-        Returns: 업로드된 파일의 Drive file ID
-        """
+        """Update an existing slot when present; retain the existing create policy."""
         from googleapiclient.http import MediaFileUpload
-
         local = Path(local_path)
-        if not local.exists():
-            raise FileNotFoundError(f"업로드할 파일 없음: {local_path}")
-
-        service    = self._get_service()
-        folder_id  = self._get_or_create_folder(remote_subfolder)
-        filename   = local.name
-        mime       = MIME_JSON if filename.endswith(".json") else MIME_PARQUET
-        media      = MediaFileUpload(str(local), mimetype=mime, resumable=True)
+        if not local.is_file() or local.is_symlink():
+            raise DriveStateError("drive_upload_source_invalid")
+        filename = _safe_name(local.name)
+        service = self._get_service()
+        folder_id = self._get_or_create_folder(remote_subfolder)
         existing_id = self._find_file(folder_id, filename)
-
+        media = MediaFileUpload(str(local), mimetype=MIME_JSON if filename.endswith(".json") else MIME_PARQUET,
+                                resumable=True)
         if existing_id:
-            file = service.files().update(
-                fileId=existing_id,
-                media_body=media,
-                fields="id",
-                supportsAllDrives=True,
-            ).execute()
-            logger.info(f"[Drive] 업데이트: {remote_subfolder}/{filename}")
+            response = service.files().update(fileId=existing_id, media_body=media,
+                                               fields="id", supportsAllDrives=True).execute()
         else:
-            file = service.files().create(
-                body={"name": filename, "parents": [folder_id]},
-                media_body=media,
-                fields="id",
-                supportsAllDrives=True,
-            ).execute()
-            logger.info(f"[Drive] 업로드: {remote_subfolder}/{filename}")
-
-        return file["id"]
+            response = service.files().create(body={"name": filename, "parents": [folder_id]},
+                                               media_body=media, fields="id", supportsAllDrives=True).execute()
+        identity = _safe_id(response.get("id"))
+        if existing_id and identity != existing_id:
+            raise DriveStateError("drive_upload_identity_mismatch")
+        logger.info("[Drive] file_upload_confirmed")
+        return identity
 
     def upload_directory(self, local_dir: str, remote_subfolder: str,
                          extensions: tuple = (".parquet", ".json")):
-        """
-        로컬 디렉터리 내 파일 전체 업로드.
-        extensions에 해당하는 확장자만 업로드.
-        """
         local = Path(local_dir)
-        if not local.exists():
-            logger.warning(f"[Drive] 디렉터리 없음: {local_dir}")
-            return
+        if not local.is_dir():
+            raise DriveStateError("drive_upload_directory_absent")
+        files = sorted(f for f in local.iterdir() if f.is_file() and f.suffix in extensions)
+        if not files:
+            raise DriveStateError("drive_upload_files_absent")
+        for file in files:
+            if not self.upload(str(file), remote_subfolder):
+                raise DriveStateError("drive_upload_unconfirmed")
+        return len(files)
 
-        files = [f for f in local.iterdir()
-                 if f.is_file() and f.suffix in extensions]
-        logger.info(f"[Drive] 디렉터리 업로드: {len(files)}개 파일 → {remote_subfolder}")
+    @staticmethod
+    def _validate_download(path: Path, filename: str):
+        if filename.endswith(".parquet"):
+            import pyarrow.parquet as pq
+            pq.read_table(path)  # valid schema-bearing zero-row placeholders are allowed
+        elif filename.endswith(".json"):
+            import json
+            json.loads(path.read_text(encoding="utf-8"))
 
-        for f in sorted(files):
-            try:
-                self.upload(str(f), remote_subfolder)
-            except Exception as e:
-                logger.error(f"[Drive] {f.name} 업로드 실패: {e}")
-
-    # ── 다운로드 ───────────────────────────────────────────────────────────────
-
-    def download(self, remote_subfolder: str, filename: str, local_path: str):
-        """
-        Drive에서 파일 다운로드.
-        remote_subfolder: 예) "data/progress"
-        filename:         예) "collection_status.json"
-        local_path:       로컬 저장 경로
-        """
-        import io
+    def _download_id(self, file_id: str, filename: str, destination: Path):
         from googleapiclient.http import MediaIoBaseDownload
-
+        if destination.is_symlink():
+            raise DriveStateError("drive_destination_invalid")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary = tempfile.mkstemp(prefix="drive-", suffix=".tmp", dir=destination.parent)
+        temporary = Path(temporary)
         try:
-            service = self._get_service()
-            folder_id = self._get_or_create_folder(remote_subfolder)
-            file_id = self._find_file(folder_id, filename)
-        except FileNotFoundError:
-            # Missing local credentials must not masquerade as absent remote data.
-            raise RuntimeError("Drive authentication/setup unavailable") from None
-
-        if file_id is None:
-            raise FileNotFoundError(
-                f"Drive에 파일 없음: {remote_subfolder}/{filename}"
-            )
-
-        Path(local_path).parent.mkdir(parents=True, exist_ok=True)
-
-        request = service.files().get_media(fileId=file_id)
-        buf = io.BytesIO()
-        downloader = MediaIoBaseDownload(buf, request)
-
-        done = False
-        while not done:
-            _, done = downloader.next_chunk()
-
-        destination = Path(local_path)
-        fd, temporary = tempfile.mkstemp(prefix=destination.name + ".", suffix=".tmp", dir=destination.parent)
-        os.close(fd)
-        try:
-            Path(temporary).write_bytes(buf.getvalue())
-            if filename.endswith(".parquet"):
-                import pyarrow.parquet as pq
-                pq.read_table(temporary)
-            elif filename.endswith(".json"):
-                import json
-                json.loads(Path(temporary).read_text(encoding="utf-8"))
+            with os.fdopen(fd, "w+b") as stream:
+                request = self._get_service().files().get_media(fileId=_safe_id(file_id), supportsAllDrives=True)
+                downloader = MediaIoBaseDownload(stream, request, chunksize=4 * 1024 * 1024)
+                done = False
+                while not done:
+                    _, done = downloader.next_chunk(num_retries=2)
+                stream.flush()
+                os.fsync(stream.fileno())
+            self._validate_download(temporary, filename)
             os.replace(temporary, destination)
         finally:
-            Path(temporary).unlink(missing_ok=True)
+            temporary.unlink(missing_ok=True)
 
-        logger.info(f"[Drive] 다운로드 완료: {remote_subfolder}/{filename} → {local_path}")
+    def download(self, remote_subfolder: str, filename: str, local_path: str):
+        _safe_name(filename)
+        try:
+            folder_id = self._lookup_folder(remote_subfolder)
+            file_id = self._find_file(folder_id, filename) if folder_id else None
+        except FileNotFoundError:
+            # Credential/setup failures are never evidence of remote absence.
+            raise DriveStateError("drive_setup_unavailable") from None
+        if file_id is None:
+            raise FileNotFoundError("drive_file_absent")
+        self._download_id(file_id, filename, Path(local_path))
+        logger.info("[Drive] file_download_validated")
+        return True
 
     def download_all(self, remote_subfolder: str, local_dir: str,
                      extensions: tuple = (".parquet", ".json")):
-        """Drive 서브폴더의 모든 파일을 로컬로 다운로드."""
-        service   = self._get_service()
-        folder_id = self._get_or_create_folder(remote_subfolder)
-
-        resp = service.files().list(
-            q=f"'{folder_id}' in parents and trashed=false",
-            fields="files(id, name)",
-            spaces="drive",
-            supportsAllDrives=True,
-            includeItemsFromAllDrives=True,
-        ).execute()
-        files = resp.get("files", [])
-
-        Path(local_dir).mkdir(parents=True, exist_ok=True)
-        for f in files:
-            if any(f["name"].endswith(ext) for ext in extensions):
-                try:
-                    self.download(
-                        remote_subfolder=remote_subfolder,
-                        filename=f["name"],
-                        local_path=str(Path(local_dir) / f["name"]),
-                    )
-                except Exception as e:
-                    logger.error(f"[Drive] {f['name']} 다운로드 실패: {e}")
+        state = self.download_all_state(remote_subfolder, local_dir, extensions)
+        if state == "failed":
+            raise DriveStateError("drive_baseline_failed")
+        return state
 
     def download_all_state(self, remote_subfolder: str, local_dir: str,
                            extensions: tuple = (".parquet",)) -> str:
-        """download_all 과 같되 결과를 세 상태로 구분한다 (2026-09-01, financials 베이스라인용).
+        """Complete listing and staged validation precede local promotion.
 
-          "ok"      하나 이상 내려받았다
-          "absent"  원격 폴더에 대상 파일이 없다 (최초 실행 — 새로 쓰는 것이 정상)
-          "failed"  목록 조회·다운로드 중 실패 (**이대로 저장→업로드하면 덮어쓴다**)
-
-        download_all() 은 파일별 실패를 로그만 남기고 삼켜 두 경우를 구분할 수 없다 —
-        ohlc_db.download_year_state 가 같은 이유로 존재한다 (us 2024 사고 구멍 A).
+        This is not a multi-file transaction or a cross-host lock. Financial and
+        yearly callers stage again before domain validation and baseline merging.
         """
+        stage = None
+        retain_recovery = False
         try:
-            service   = self._get_service()
-            folder_id = self._get_or_create_folder(remote_subfolder)
-            resp = service.files().list(
-                q=f"'{folder_id}' in parents and trashed=false",
-                fields="files(id, name)",
-                spaces="drive",
-                supportsAllDrives=True,
-                includeItemsFromAllDrives=True,
-            ).execute()
-            files = [f for f in resp.get("files", [])
-                     if any(f["name"].endswith(ext) for ext in extensions)]
-        except Exception as e:
-            logger.error(f"[Drive] {remote_subfolder} 목록 조회 실패: {e}")
-            return "failed"
-
-        if not files:
-            return "absent"
-
-        Path(local_dir).mkdir(parents=True, exist_ok=True)
-        for f in files:
+            folder_id = self._lookup_folder(remote_subfolder)
+            if folder_id is None:
+                return "absent"
+            files = self._list(f"'{_safe_id(folder_id)}' in parents and trashed=false")
+            selected, names = [], set()
+            for item in files:
+                if not item["name"].endswith(extensions):
+                    continue
+                name = _safe_name(item["name"])
+                if name.casefold() in names or item.get("mimeType") == MIME_FOLDER:
+                    raise DriveStateError("drive_file_ambiguous")
+                names.add(name.casefold())
+                selected.append(item)
+            if not selected:
+                return "absent"
+            destination = Path(local_dir)
+            if destination.is_symlink():
+                raise DriveStateError("drive_destination_invalid")
+            destination.mkdir(parents=True, exist_ok=True)
+            stage = Path(tempfile.mkdtemp(prefix=".drive-stage-", dir=destination))
+            incoming, backup = stage / "incoming", stage / "backup"
+            incoming.mkdir()
+            backup.mkdir()
+            for item in selected:
+                target = destination / item["name"]
+                if target.is_symlink() or (target.exists() and not target.is_file()):
+                    raise DriveStateError("drive_destination_invalid")
+                self._download_id(item["id"], item["name"], incoming / item["name"])
+            # Preserve every old file before the first replacement.
+            old_names = set()
+            for item in selected:
+                target = destination / item["name"]
+                if target.exists():
+                    shutil.copyfile(target, backup / item["name"])
+                    old_names.add(item["name"])
+            promoted = []
             try:
-                self.download(
-                    remote_subfolder=remote_subfolder,
-                    filename=f["name"],
-                    local_path=str(Path(local_dir) / f["name"]),
-                )
-            except Exception as e:
-                logger.error(f"[Drive] {f['name']} 다운로드 실패: {e}")
-                return "failed"
-        return "ok"
-
-    # ── 전체 업로드 (수집 완료 후 일괄) ──────────────────────────────────────
+                for item in selected:
+                    name = item["name"]
+                    os.replace(incoming / name, destination / name)
+                    promoted.append(name)
+            except Exception:
+                for name in reversed(promoted):
+                    try:
+                        if name in old_names:
+                            os.replace(backup / name, destination / name)
+                        else:
+                            (destination / name).unlink()
+                    except OSError:
+                        retain_recovery = True
+                raise DriveStateError("drive_promotion_failed") from None
+            return "ok"
+        except Exception:
+            logger.error("[Drive] baseline_failed")
+            return "failed"
+        finally:
+            if stage is not None and not retain_recovery:
+                shutil.rmtree(stage)
+            elif retain_recovery:
+                logger.error("[Drive] local_recovery_required")
 
     def sync_all_local(self):
-        """
-        data/local/ 하위 모든 Parquet/JSON 파일을 Drive에 동기화.
-        bootstrap 완료 후 일괄 업로드 시 사용.
-        """
         local_root = Path(config.LOCAL_DATA_DIR)
-
+        count = 0
         for dtype, remote_path in config.DRIVE_PATHS.items():
             local_subdir = local_root / dtype
             if local_subdir.exists():
-                self.upload_directory(str(local_subdir), remote_path)
-
-        logger.info("[Drive] 전체 동기화 완료")
+                count += self.upload_directory(str(local_subdir), remote_path)
+        if not count:
+            raise DriveStateError("drive_upload_files_absent")
+        logger.info("[Drive] full_sync_confirmed")

@@ -82,7 +82,10 @@ def _validated_frame(df: pd.DataFrame, year: int, *, allow_duplicates=False) -> 
 
 def _read_year_path(path: Path, year: int) -> pd.DataFrame:
     try:
-        return _validated_frame(pq.read_table(str(path)).to_pandas(), year)
+        frame = pq.read_table(str(path)).to_pandas()
+        if not {"Code", "Date"}.issubset(frame.columns):
+            raise KrStateError("kr_baseline_schema_invalid")
+        return _validated_frame(frame, year)
     except Exception as error:
         raise KrStateError(f"marcap-{year} read failed: {type(error).__name__}") from None
 
@@ -321,6 +324,8 @@ def upload_years(years: list[int], uploader=None) -> list[str]:
         return [f"marcap-{year}.parquet" for year in years]
 
     remote_path = config.DRIVE_PATHS.get("ohlc_kr")
+    if not remote_path:
+        return [f"marcap-{year}.parquet" for year in years]
     failed: list[str] = []
     for year in years:
         path = local_path(year)
@@ -330,7 +335,8 @@ def upload_years(years: list[int], uploader=None) -> list[str]:
             continue
         try:
             load_year(year, strict=True)
-            if u.upload(str(path), remote_path) is False:
+            result = u.upload(str(path), remote_path)
+            if result is not True and not (isinstance(result, str) and result.strip()):
                 raise KrStateError("uploader explicitly reported failure")
             logger.info(f"[KrDB] Drive 업로드 완료: {path.name}")
         except Exception as e:
@@ -391,16 +397,39 @@ def download_year(year: int, uploader=None) -> bool:
 
 
 def download_all(uploader=None):
-    """Drive kr/ 폴더의 모든 parquet 다운로드."""
+    """Stage and validate all partitions before preserving the local/remote union."""
+    import re
     u = _get_uploader(uploader)
-    if u is None:
-        return
-
     remote_path = config.DRIVE_PATHS.get("ohlc_kr")
+    if u is None or not remote_path:
+        raise RuntimeError("kr_baseline_unavailable")
     _LOCAL_ROOT.mkdir(parents=True, exist_ok=True)
-
-    try:
-        u.download_all(remote_path, str(_LOCAL_ROOT), extensions=(".parquet",))
-        logger.info("[KrDB] Drive 전체 다운로드 완료")
-    except Exception as e:
-        logger.error(f"[KrDB] 전체 다운로드 실패: {e}")
+    with tempfile.TemporaryDirectory(prefix=".kr-baseline-", dir=_LOCAL_ROOT) as directory:
+        stage = Path(directory)
+        state = u.download_all_state(remote_path, str(stage), extensions=(".parquet",))
+        if state not in {"ok", "absent"}:
+            raise RuntimeError("kr_baseline_failed")
+        if state == "absent" and any(stage.iterdir()):
+            raise RuntimeError("kr_baseline_state_mismatch")
+        candidates = []
+        for path in sorted(stage.glob("*.parquet")):
+            match = re.fullmatch(r"marcap-([0-9]{4})\.parquet", path.name)
+            if not match:
+                raise RuntimeError("kr_baseline_filename_invalid")
+            year = int(match.group(1))
+            incoming = _read_year_path(path, year)
+            existing = load_year(year, strict=True)
+            merged = _merge_year(incoming, existing, year) if not existing.empty else incoming
+            _write_staged_frame(merged, year, path)
+            candidates.append((path, local_path(year)))
+        # Local-only partitions are also validated before the first promotion.
+        for path in _LOCAL_ROOT.glob("marcap-*.parquet"):
+            match = re.fullmatch(r"marcap-([0-9]{4})\.parquet", path.name)
+            if not match:
+                raise RuntimeError("kr_local_filename_invalid")
+            load_year(int(match.group(1)), strict=True)
+        if state == "ok" and not candidates:
+            raise RuntimeError("kr_baseline_empty_response")
+        for source, destination in candidates:
+            os.replace(source, destination)
+        return state
