@@ -304,3 +304,43 @@ def test_kr_daily_stops_when_the_baseline_download_failed(kr_paths, monkeypatch)
     with pytest.raises(SystemExit) as stopped:
         kr_main.run_kr_daily(SimpleNamespace(dry_run=False, upload_drive=True))
     assert stopped.value.code == 1
+
+
+def _holed_frame(tickers, holed, days):
+    """holed 종목만 가운데 날짜를 비운 프레임."""
+    rows = []
+    for t in tickers:
+        for d in days:
+            if t in holed and d == days[1]:
+                continue
+            rows.append({"Ticker": t, "Date": d})
+    return pd.DataFrame(rows)
+
+
+def test_one_ticker_with_an_internal_hole_does_not_discard_the_market():
+    """그 날짜를 통째로 못 받은 종목은 이미 허용한다. 일부라도 받은 종목을 더
+    엄하게 다루면 계약이 서로 어긋나고, 창이 넓어질수록 반드시 재발한다
+    (2026-09-24 실제로 US·크립토 둘 다 이 게이트에서 멈췄다)."""
+    days = [date(2026, 1, n) for n in (5, 6, 7)]
+    tickers = [f"T{i:03}" for i in range(100)]
+    frame = _holed_frame(tickers, {"T042"}, days)
+    # 구멍 난 종목은 커서를 확정해 주지 못하므로 나머지 99종목 기준으로 잡는다.
+    assert oc._incremental_cursor(frame, tickers, [], date(2026, 1, 4), "us") == days[-1]
+
+
+def test_many_internal_holes_are_a_collection_fault_and_still_stop():
+    days = [date(2026, 1, n) for n in (5, 6, 7)]
+    tickers = [f"T{i:03}" for i in range(100)]
+    frame = _holed_frame(tickers, {f"T{i:03}" for i in range(10)}, days)
+    with pytest.raises(oc.CollectionIncompleteError, match="session_unverified"):
+        oc._incremental_cursor(frame, tickers, [], date(2026, 1, 4), "us")
+
+
+def test_holes_and_missing_tickers_share_one_threshold():
+    """구멍 3% + 누락 3% = 6% 로 임계(5%)를 넘는다 — 따로 세면 둘 다 통과해 버린다."""
+    days = [date(2026, 1, n) for n in (5, 6, 7)]
+    tickers = [f"T{i:03}" for i in range(100)]
+    present = tickers[:97]                       # 3종목은 아예 수집되지 않았다
+    frame = _holed_frame(present, {f"T{i:03}" for i in range(3)}, days)
+    with pytest.raises(oc.CollectionIncompleteError, match="session_unverified"):
+        oc._incremental_cursor(frame, tickers, [], date(2026, 1, 4), "us")
