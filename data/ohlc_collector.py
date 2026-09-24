@@ -1590,7 +1590,10 @@ def collect_sector_meta(market: str) -> pd.DataFrame:
         sector, industry = "", ""
         try:
             info = yf.Ticker(t).info
-            if not isinstance(info, dict) or not info:
+            # 폐기·오류 종목(HTTP 404)에 yfinance 는 예외도 빈 dict 도 아닌
+            # {'trailingPegRatio': None} 을 돌려준다 — `not info` 로는 못 잡는다.
+            # 종목 신원 증거가 있어야 관측으로 인정한다(정상 응답엔 둘 중 하나가 있다).
+            if not isinstance(info, dict) or not ({"symbol", "quoteType"} & set(info)):
                 raise ValueError("sector_info_unverified")
             failed = []
             fields = {}
