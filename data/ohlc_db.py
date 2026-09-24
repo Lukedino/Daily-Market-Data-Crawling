@@ -346,6 +346,12 @@ def validate_price_basis(df: pd.DataFrame, market: str, *, as_of: date | None = 
             continue
         old = existing.set_index(["Ticker", "Date"])
         new = incoming[incoming["Date"].map(lambda day: day.year == year)].set_index(["Ticker", "Date"])
+        # 저장본이 기록되던 시점에 미완성이던 크립토 봉. 면제 기준을 '오늘' 에만
+        # 두면 실행이 매일 돌 때만 맞는다 — 수집이 며칠 멈췄다 재개되면 저장본의
+        # 마지막 이틀이 면제에서 빠져 전부 불일치로 잡힌다(2026-09-24 실측: 저장
+        # 시각 09-22 00:47 UTC, 09-21 은 1/66·09-22 는 0/66 일치, 그 앞은 전부 일치).
+        stored_last = pd.to_datetime(existing["Date"]).dt.date.max()
+        crypto_unsettled = min(as_of, stored_last) - timedelta(days=1)
         for key in old.index.intersection(new.index):
             if key[0] in replace_tickers:
                 continue  # 기존의 명시적인 Crypto 심볼 정정/purge 계약은 유지한다.
@@ -353,7 +359,7 @@ def validate_price_basis(df: pd.DataFrame, market: str, *, as_of: date | None = 
                 continue  # 이 창에 배당·분할이 있었다 — 재조정은 예상된 변화다.
             # Crypto 당일 및 직전 UTC 일봉은 이전 실행에서 미완성이었을 수 있다.
             # 기존 7일 재조회에 의한 봉 완성을 가격 기준 변경으로 오인하지 않는다.
-            if market == "crypto" and key[1] >= as_of - timedelta(days=1):
+            if market == "crypto" and key[1] >= crypto_unsettled:
                 continue
             compared.add(key[0])
             values = {}

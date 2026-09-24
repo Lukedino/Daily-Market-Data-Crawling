@@ -57,11 +57,29 @@ def test_new_day_jump_and_float_representation_are_not_overlap_mismatch(local):
     db.validate_price_basis(rows(day=date(2026, 1, 6), close=100), "us")
 
 
+def _crypto_days(*days, close=10.):
+    return pd.concat([rows(day=d, close=close) for d in days], ignore_index=True)
+
+
 def test_crypto_unfinished_previous_utc_day_can_complete(local):
-    db.save_year(rows(day=date(2026, 9, 21)), "crypto", 2026)
+    db.save_year(_crypto_days(date(2026, 9, 20), date(2026, 9, 21)), "crypto", 2026)
     db.validate_price_basis(rows(day=date(2026, 9, 21), close=11), "crypto", as_of=date(2026, 9, 22))
-    with pytest.raises(db.PriceBasisError):
-        db.validate_price_basis(rows(day=date(2026, 9, 21), close=11), "crypto", as_of=date(2026, 9, 23))
+
+
+def test_crypto_bars_unsettled_when_stored_stay_exempt_after_an_outage(local):
+    """면제 기준을 '오늘' 에만 두면 실행이 매일 돌 때만 맞는다. 저장 시각에
+    미완성이던 봉은 며칠 뒤 다시 받아도 달라지는 게 정상이다
+    (2026-09-24 실측: 저장 09-22 00:47 UTC, 09-21 은 1/66·09-22 는 0/66 일치)."""
+    db.save_year(_crypto_days(date(2026, 9, 18), date(2026, 9, 21), date(2026, 9, 22)), "crypto", 2026)
+    settled_later = _crypto_days(date(2026, 9, 21), date(2026, 9, 22), close=11)
+    db.validate_price_basis(settled_later, "crypto", as_of=date(2026, 9, 24))
+
+
+def test_crypto_bars_settled_before_storage_are_still_compared(local):
+    """면제는 저장 당시 미완성이던 봉까지다 — 그 전의 확정 봉이 바뀌면 여전히 잡는다."""
+    db.save_year(_crypto_days(date(2026, 9, 18), date(2026, 9, 21), date(2026, 9, 22)), "crypto", 2026)
+    with pytest.raises(db.PriceBasisError, match="price_basis_mismatch"):
+        db.validate_price_basis(rows(day=date(2026, 9, 18), close=11), "crypto", as_of=date(2026, 9, 24))
 
 
 @pytest.mark.parametrize("dividend,split", [(1., 0.), (0., 2.), (0., 0.)])
