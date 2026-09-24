@@ -1207,6 +1207,31 @@ def incremental_start_date(market: str, last_date: date) -> date:
     return last_date
 
 
+SPARSE_SESSION_MIN_PCT = 50.0
+"""그 날짜를 보고한 종목 비율의 하한. 공급자가 특정 날짜를 대부분 종목에
+주지 않는 일이 있다 — 2026-09-24 실측으로 US 2026-09-22 봉이 중형주 28/28 에
+없고 메가캡에만 있었다(503종목 표본 12.1%). 그런 날짜는 세션이 아니라 결손이다."""
+
+MAX_CURSOR_HOLD_DAYS = 7
+"""결손 날짜 앞에서 커서를 잡아 두는 최대 기간. 다음 실행이 다시 받게 하되,
+공급자가 끝내 복구하지 않으면 수집 창이 무한히 커지므로 탈출구를 둔다.
+이 기간이 지나면 그 날짜를 포기하고 전진한다(잃지만 수집은 계속된다)."""
+
+
+def sparse_session_dates(frame: pd.DataFrame,
+                         min_pct: float = SPARSE_SESSION_MIN_PCT) -> list:
+    """대부분 종목에 없는 날짜 목록. 커서 상한과 게시 제외가 같은 판정을 쓴다."""
+    if frame.empty or "Date" not in frame.columns:
+        return []
+    days = pd.to_datetime(frame["Date"], errors="coerce").dt.date
+    universe = frame["Ticker"].nunique()
+    if not universe:
+        return []
+    counts = frame.assign(_day=days).groupby("_day")["Ticker"].nunique()
+    floor = universe * min_pct / 100.0
+    return sorted(day for day, seen in counts.items() if seen < floor)
+
+
 def _incremental_cursor(frame: pd.DataFrame, tickers: list[str], failed: list[str],
                         last_date: date, market: str) -> date:
     from data import ohlc_db
@@ -1264,7 +1289,18 @@ def _incremental_cursor(frame: pd.DataFrame, tickers: list[str], failed: list[st
             raise CollectionIncompleteError("session_unverified", sorted(holed))
         logger.warning("session_unverified_tolerated")
     # 일부 종목만 최근 날짜까지 왔다고 공통 max 커서를 앞당기지 않는다.
-    return max(last_date, min(max(days) for days in by_ticker.values()))
+    cursor = max(last_date, min(max(days) for days in by_ticker.values()))
+    # 공급자가 대부분 종목에 주지 않은 날짜를 커서가 지나가면 그 날짜는 다시
+    # 요청되지 않아 영구 결손이 된다. 그 앞에서 멈춰 다음 실행이 다시 받게 한다.
+    sparse = [day for day in sparse_session_dates(frame) if day <= cursor]
+    if sparse:
+        if (date.today() - last_date).days <= MAX_CURSOR_HOLD_DAYS:
+            logger.warning("cursor_held_for_sparse_session")
+            return max(last_date, min(sparse) - timedelta(days=1))
+        # 탈출구 — 공급자가 끝내 복구하지 않으면 창이 무한히 커진다.
+        # 그 날짜는 잃지만 수집은 계속되는 편이 낫다.
+        logger.warning("sparse_session_abandoned")
+    return cursor
 
 
 def update_market(
@@ -1341,6 +1377,18 @@ def update_market(
     except Exception:
         raise CollectionIncompleteError("collection_failed") from None
     actual_last = _incremental_cursor(new_df, tickers, failed, last_date, market)
+    # 커서가 멈춰 선 그 날짜를 게시하면 일자별 커버리지 연속성 게이트가 막는다
+    # (그 게이트는 제대로 동작하는 것이다 — 12% 짜리 날짜를 파일에 넣지 않는다).
+    # 커서 판정과 같은 기준으로 그 날짜 행만 빼고 나머지는 정상 게시한다.
+    sparse = set(sparse_session_dates(new_df))
+    if sparse:
+        keep = ~pd.to_datetime(new_df["Date"], errors="coerce").dt.date.isin(sparse)
+        attrs = dict(new_df.attrs)          # 불리언 색인은 attrs 를 잃는다 —
+        new_df = new_df[keep].reset_index(drop=True)
+        new_df.attrs.update(attrs)          # 잃으면 가격 기준 검증이 통째로 꺼진다.
+        logger.warning("sparse_session_excluded")
+        if new_df.empty:
+            raise CollectionIncompleteError("empty_unverified", tickers)
     ohlc_db.validate_price_basis(new_df, market)
 
     # 6-b. MarketCap 보강

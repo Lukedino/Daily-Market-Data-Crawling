@@ -59,7 +59,8 @@ _SOURCES = {
 _EVENTS = {"operation_failed", "writer_busy", "external_output_suppressed",
            "collection_started", "collection_completed", "dry_run", "status_requested",
            "collection_incomplete_tolerated", "session_unverified_tolerated",
-           "market_failed"}
+           "market_failed", "cursor_held_for_sparse_session",
+           "sparse_session_abandoned", "sparse_session_excluded"}
 # Every snake_case code raised anywhere in data/, scripts/ and main.py. A code that is
 # missing here is silently dropped from the artifact, so a failure shows as a bare
 # operation_failed with no cause — that is how the 2026-09-22 OHLC outage stayed opaque

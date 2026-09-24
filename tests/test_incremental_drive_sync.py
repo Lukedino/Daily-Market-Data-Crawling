@@ -365,3 +365,54 @@ def test_every_ticker_holed_is_a_collection_fault():
         [{"Ticker": "BBB", "Date": d} for d in days if d != days[2]])
     with pytest.raises(oc.CollectionIncompleteError, match="session_unverified"):
         oc._incremental_cursor(frame, ["AAA", "BBB"], [], date(2026, 1, 4), "us")
+
+
+def _coverage_frame(days_by_ticker):
+    return pd.DataFrame([{"Ticker": t, "Date": d} for t, days in days_by_ticker.items() for d in days])
+
+
+def test_a_date_most_tickers_lack_holds_the_cursor_in_front_of_it():
+    """공급자가 특정 날짜를 대부분 종목에 주지 않는 일이 있다 — 2026-09-24 실측으로
+    US 09-22 봉이 중형주 28/28 에 없고 메가캡에만 있었다. 커서가 그 날짜를 지나면
+    다시 요청되지 않아 영구 결손이 된다."""
+    days = [date.today() - timedelta(days=n) for n in (3, 2, 1)]   # 오래된 순
+    full, sparse_day = days[0], days[1]
+    by = {f"T{i:03}": ([full, days[2]] if i else [full, sparse_day, days[2]]) for i in range(20)}
+    cursor = oc._incremental_cursor(_coverage_frame(by), list(by), [], full, "us")
+    assert cursor == full, "결손 날짜 앞에서 멈춰야 한다"
+
+
+def test_the_hold_gives_up_after_a_week_so_the_window_cannot_grow_forever():
+    """공급자가 끝내 복구하지 않으면 창이 무한히 커진다 — 그 날짜는 잃지만
+    수집은 계속되는 편이 낫다."""
+    days = [date.today() - timedelta(days=n) for n in (3, 2, 1)]
+    stale = date.today() - timedelta(days=oc.MAX_CURSOR_HOLD_DAYS + 1)
+    by = {f"T{i:03}": ([days[0], days[2]] if i else days) for i in range(20)}
+    cursor = oc._incremental_cursor(_coverage_frame(by), list(by), [], stale, "us")
+    assert cursor == days[2], "탈출 후에는 정상 커서로 전진한다"
+
+
+def test_sparse_dates_are_kept_out_of_what_gets_published(harness):
+    """커버리지 연속성 게이트는 제대로 동작하는 것이다 — 12% 짜리 날짜를 파일에
+    넣지 않는다. 그 날짜 행만 빼고 나머지는 정상 게시한다."""
+    calls, monkeypatch = harness
+    tickers = [f"T{i:03}" for i in range(20)]
+    monkeypatch.setattr(ohlc_db, "download_year_state", lambda *a, **k: "ok")
+    good, thin = date.today() - timedelta(days=2), date.today() - timedelta(days=1)
+    rows = pd.concat(
+        [_new_rows().assign(Ticker=t, Date=good) for t in tickers] +
+        [_new_rows().assign(Ticker=tickers[0], Date=thin)], ignore_index=True)
+    published = {}
+    monkeypatch.setattr(ohlc_db, "append_rows",
+                        lambda df, market: published.setdefault("days", set(df["Date"])) or [date.today().year])
+    monkeypatch.setattr(oc, "fetch_ohlc_range", lambda *a, **k: (rows, []))
+    oc.update_market("us", tickers=tickers, upload=True)
+    assert thin not in published["days"] and good in published["days"]
+
+
+def test_sparse_session_detection_counts_tickers_not_rows():
+    days = [date(2026, 1, 5), date(2026, 1, 6)]
+    by = {f"T{i:02}": ([days[0], days[1]] if i < 2 else [days[0]]) for i in range(10)}
+    assert oc.sparse_session_dates(_coverage_frame(by)) == [days[1]]   # 2/10 = 20% < 50%
+    full = {f"T{i:02}": days for i in range(10)}
+    assert oc.sparse_session_dates(_coverage_frame(full)) == []
