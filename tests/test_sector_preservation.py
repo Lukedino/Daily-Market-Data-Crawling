@@ -103,12 +103,16 @@ def test_failed_fields_preserve_values_and_timestamp(failed_fields):
     assert observed["updated_at"] == "2026-09-01T00:00:00"
 
 
-def test_failed_new_ticker_holds_whole_candidate():
-    path, before = prior()
+def test_failed_new_ticker_leaves_its_own_fields_empty_and_publishes_the_rest():
+    """되돌릴 이전 값이 없는 신규 종목이 실패해도 그 주 산출물 전체(US 1,061행)를
+    버리지 않는다. 나쁜 심볼 하나가 들어오면 매주 반복 실패하던 구조였다."""
+    prior()
     fresh = meta(("AAPL", "NEW"))
     fresh.attrs["sector_failed_fields"] = {"NEW": ["Sector", "Industry"]}
-    with pytest.raises(db.DriveSyncError, match="unverified"): db.save_sector_meta(fresh, "us")
-    assert path.read_bytes() == before
+    assert db.save_sector_meta(fresh, "us") is True
+    observed = db.load_sector_meta("us").set_index("Ticker")
+    assert observed.at["NEW", "Sector"] == "" and observed.at["NEW", "Industry"] == ""
+    assert observed.at["AAPL", "Sector"] == "Technology"   # 나머지는 정상 게시
 
 
 def setup_info(monkeypatch, info, *, tickers=("AAPL",)):
@@ -123,7 +127,11 @@ def setup_info(monkeypatch, info, *, tickers=("AAPL",)):
     monkeypatch.setattr(yfinance, "Ticker", ticker)
 
 
-@pytest.mark.parametrize("value", [OSError("SYNTHETIC_SECRET"), {}, None, ["bad"]])
+# {"trailingPegRatio": None} 이 야후 404 의 실제 응답이다 — 예외도 빈 dict 도
+# 아니라서 `not info` 로는 못 잡았고, 빈 섹터가 정상 관측으로 저장돼 직전 값을
+# 덮어썼다(09-20 BLD·CPRX, 09-13·09-06 BLD, 08-31 U-UN-TO 로 실측).
+@pytest.mark.parametrize("value", [OSError("SYNTHETIC_SECRET"), {}, None, ["bad"],
+                                   {"trailingPegRatio": None}])
 def test_actual_info_failure_preserves_existing(monkeypatch, value):
     prior()
     setup_info(monkeypatch, {"AAPL": value})

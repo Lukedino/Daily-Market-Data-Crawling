@@ -959,11 +959,20 @@ def save_sector_meta(df: pd.DataFrame, market: str, allow_shrink: bool = False):
     failed_fields = df.attrs.get("sector_failed_fields", {})
     candidate = df[_SECTOR_COLUMNS].copy()
     old = prior.set_index("Ticker")
+    unresolved = []   # 기준본에 없어 되돌릴 값이 없는 신규 종목
     for index, row in candidate.iterrows():
         failed = failed_fields.get(row["Ticker"], [])
         if failed:
             if row["Ticker"] not in old.index:
-                raise DriveSyncError("sector_observation_unverified")
+                # 되돌릴 이전 값이 없는 신규 종목이다. 예전에는 여기서 중단해
+                # 나쁜 심볼 하나가 그 주 산출물 전체(US 1,061행)를 버리게 했다.
+                # 그 행의 해당 필드만 빈 값으로 두고 나머지는 게시한다.
+                for field in failed:
+                    if field not in {"Sector", "Industry"}:
+                        raise DriveSyncError("sector_observation_invalid")
+                    candidate.at[index, field] = ""
+                unresolved.append(row["Ticker"])
+                continue
             for field in failed:
                 if field not in {"Sector", "Industry"}:
                     raise DriveSyncError("sector_observation_invalid")
@@ -976,7 +985,8 @@ def save_sector_meta(df: pd.DataFrame, market: str, allow_shrink: bool = False):
         if len(candidate) < floor:
             raise CoverageShrinkError("sector_ticker_coverage_shrink")
     _write_sector_frame(sector_meta_path(market), candidate)
-    logger.info("[OhlcDB] sector_saved rows=%d preserved=%d", len(candidate), len(failed_fields))
+    logger.info("[OhlcDB] sector_saved rows=%d preserved=%d unresolved=%d",
+                len(candidate), len(failed_fields), len(unresolved))
     return True
 
 

@@ -97,7 +97,7 @@ _ERROR_CODES = {
     "resave_requested_file_absent", "sector_baseline_invalid", "sector_collection_empty",
     "sector_download_failed", "sector_download_unavailable", "sector_field_invalid",
     "sector_info_unverified", "sector_keys_invalid", "sector_observation_invalid",
-    "sector_observation_unverified", "sector_publication_failed", "sector_schema_invalid",
+    "sector_publication_failed", "sector_schema_invalid",
     "sector_ticker_coverage_shrink", "sector_timestamp_invalid", "sector_upload_unavailable",
     "sector_upload_unconfirmed", "session_unverified", "source_date_unverified",
     "universe_unverified", "writer_busy", "writer_lock_invalid",
