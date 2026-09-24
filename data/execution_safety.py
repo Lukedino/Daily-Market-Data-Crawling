@@ -57,17 +57,47 @@ _SOURCES = {
     "kr_financials_collector.py", "resave_ohlc.py", "verify_ohlc.py", "verify_kr.py",
 }
 _EVENTS = {"operation_failed", "writer_busy", "external_output_suppressed",
-           "collection_started", "collection_completed", "dry_run", "status_requested"}
+           "collection_started", "collection_completed", "dry_run", "status_requested",
+           "collection_incomplete_tolerated"}
+# Every snake_case code raised anywhere in data/, scripts/ and main.py. A code that is
+# missing here is silently dropped from the artifact, so a failure shows as a bare
+# operation_failed with no cause — that is how the 2026-09-22 OHLC outage stayed opaque
+# (collection_incomplete was raised but unlisted, while a renamed incremental_incomplete
+# lingered here unraised). tests/test_execution_safety_codes.py keeps the two in step.
 _ERROR_CODES = {
-    "price_basis_unverified", "price_basis_mismatch", "source_date_unverified",
-    "universe_unverified", "empty_unverified", "session_unverified",
-    "incremental_incomplete", "fdr_version_unverified", "kr_source_failed",
-    "kr_snapshot_invalid", "kr_baseline_failed", "kr_baseline_invalid",
-    "sector_observation_unverified", "sector_baseline_invalid", "sector_download_failed",
-    "sector_publication_failed", "sector_collection_empty", "sector_ticker_coverage_shrink",
-    "pending_baseline_unavailable", "pending_baseline_failed", "pending_baseline_invalid",
-    "resave_publication_failed", "drive_baseline_failed", "drive_listing_incomplete",
-    "drive_file_ambiguous", "drive_folder_ambiguous", "drive_credentials_absent",
+    "collection_failed", "collection_incomplete", "collection_invalid_dates",
+    "collection_unexpected_ticker", "drive_baseline_failed", "drive_credentials_absent",
+    "drive_destination_invalid", "drive_file_absent", "drive_file_ambiguous",
+    "drive_folder_ambiguous", "drive_id_invalid", "drive_listing_duplicate",
+    "drive_listing_incomplete", "drive_listing_invalid", "drive_listing_limit",
+    "drive_name_invalid", "drive_pagination_invalid", "drive_path_invalid",
+    "drive_promotion_failed", "drive_setup_unavailable", "drive_upload_directory_absent",
+    "drive_upload_files_absent", "drive_upload_identity_mismatch",
+    "drive_upload_source_invalid", "drive_upload_unconfirmed", "empty_universe",
+    "empty_unverified", "fdr_version_unverified", "financials_baseline_download_failed",
+    "financials_baseline_invalid", "financials_baseline_state_invalid",
+    "financials_collection_empty", "financials_dart_unavailable", "financials_date_invalid",
+    "financials_drive_path_missing", "financials_duplicate_key", "financials_filename_invalid",
+    "financials_partition_invalid", "financials_period_invalid",
+    "financials_publish_file_missing", "financials_read_failed", "financials_replace_failed",
+    "financials_schema_invalid", "financials_stage_failed", "financials_ticker_invalid",
+    "financials_uploader_unavailable", "financials_value_invalid", "financials_year_invalid",
+    "kr_baseline_empty_response", "kr_baseline_failed", "kr_baseline_filename_invalid",
+    "kr_baseline_invalid", "kr_baseline_schema_invalid", "kr_baseline_state_mismatch",
+    "kr_baseline_unavailable", "kr_collection_empty_unverified", "kr_local_filename_invalid",
+    "kr_snapshot_invalid", "kr_source_failed", "kr_source_too_large", "ohlc_baseline_absent",
+    "ohlc_baseline_failed", "ohlc_baseline_incomplete", "ohlc_baseline_inconsistent",
+    "ohlc_baseline_name_invalid", "ohlc_market_invalid", "ohlc_remote_unconfigured",
+    "ohlc_uploader_unavailable", "pending_baseline_failed", "pending_baseline_invalid",
+    "pending_baseline_unavailable", "price_basis_mismatch", "price_basis_unverified",
+    "price_values_unverified", "resave_files_absent", "resave_publication_failed",
+    "resave_requested_file_absent", "sector_baseline_invalid", "sector_collection_empty",
+    "sector_download_failed", "sector_download_unavailable", "sector_field_invalid",
+    "sector_info_unverified", "sector_keys_invalid", "sector_observation_invalid",
+    "sector_observation_unverified", "sector_publication_failed", "sector_schema_invalid",
+    "sector_ticker_coverage_shrink", "sector_timestamp_invalid", "sector_upload_unavailable",
+    "sector_upload_unconfirmed", "session_unverified", "source_date_unverified",
+    "universe_unverified", "writer_busy", "writer_lock_invalid",
 }
 
 

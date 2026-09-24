@@ -254,21 +254,31 @@ def run_ohlc_update(args):
 
     from data import ohlc_collector
     markets = ["us", "crypto"] if args.market == "all" else [args.market]
+    failures = []
     for market in markets:
         logger.info(f"[OhlcUpdate] {market.upper()} 증분 업데이트 시작")
         if not args.dry_run:
-            new_tickers = ohlc_collector.backfill_new_tickers(
-                market=market,
-                upload=args.upload_drive,
-            )
-            if new_tickers:
-                logger.info(f"[OhlcUpdate] {market.upper()} 신규 종목 백필 완료: {new_tickers}")
-            ohlc_collector.update_market(
-                market=market,
-                upload=args.upload_drive,
-            )
+            # 한 시장의 실패가 다른 시장의 수집까지 막지 않는다 — 2026-09-22 의
+            # market=all 실행은 US 에서 죽어 크립토가 시작조차 못 했다. 실패는
+            # 모아 두었다가 루프가 끝난 뒤 첫 건을 그대로 올려 잡을 실패시킨다.
+            try:
+                new_tickers = ohlc_collector.backfill_new_tickers(
+                    market=market,
+                    upload=args.upload_drive,
+                )
+                if new_tickers:
+                    logger.info(f"[OhlcUpdate] {market.upper()} 신규 종목 백필 완료: {new_tickers}")
+                ohlc_collector.update_market(
+                    market=market,
+                    upload=args.upload_drive,
+                )
+            except Exception as error:
+                logger.error(f"[OhlcUpdate] {market.upper()} 실패 — 남은 시장은 계속한다")
+                failures.append(error)
         else:
             logger.info(f"[DryRun] {market.upper()} ohlc update 시뮬레이션")
+    if failures:
+        raise failures[0]
 
 
 def run_ohlc_new_backfill(args):

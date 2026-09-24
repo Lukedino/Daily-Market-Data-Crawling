@@ -1209,23 +1209,36 @@ def incremental_start_date(market: str, last_date: date) -> date:
 
 def _incremental_cursor(frame: pd.DataFrame, tickers: list[str], failed: list[str],
                         last_date: date, market: str) -> date:
+    from data import ohlc_db
+
     if frame.empty:
         raise CollectionIncompleteError("empty_unverified", tickers)
     required = set(tickers)
     collected = set(frame["Ticker"])
-    missing = (required - collected) | set(failed)
-    if missing:
-        raise CollectionIncompleteError("collection_incomplete", missing)
     if collected - required:
         raise CollectionIncompleteError("collection_unexpected_ticker")
+    # 공급자는 매일 소수 종목을 돌려주지 않는다 — US 실측이 1,058 요청 중 1,053
+    # 수집(0.47%)이라 "전부 수집" 은 만족한 적 없는 조건이다. 검증까지 끝난 행을
+    # 버리는 대신 커서만 검증된 집합 기준으로 잡아, 못 받은 종목의 날짜는
+    # 게시하지 않으면서 받은 종목은 정상 게시한다. 다만 대량 누락은 수집 자체의
+    # 고장이므로 연도 파일 축소 가드와 같은 임계로 중단한다.
+    missing = (required - collected) | set(failed)
+    verified = required - missing
+    tolerated = len(required) * ohlc_db.TICKER_SHRINK_TOLERANCE_PCT / 100.0
+    if not verified or len(missing) > tolerated:
+        raise CollectionIncompleteError("collection_incomplete", missing)
+    if missing:
+        # 공개 로그는 메시지를 검토된 이벤트 이름으로만 남긴다(PublicFormatter).
+        # 종목 수·목록은 값이라 artifact 에 싣지 않는다.
+        logger.warning("collection_incomplete_tolerated")
     dates = pd.to_datetime(frame["Date"], errors="raise").dt.date
     if dates.isna().any() or frame.assign(Date=dates).duplicated(["Ticker", "Date"]).any():
         raise CollectionIncompleteError("collection_invalid_dates")
-    by_ticker = {ticker: set(dates[frame["Ticker"] == ticker]) for ticker in required}
+    by_ticker = {ticker: set(dates[frame["Ticker"] == ticker]) for ticker in verified}
     # 서로 다른 거래소의 휴장일을 강제로 일치시키지 않는다. 동일 달력군의
     # 첫~마지막 반환일 내부 구멍도 휴장/정지라고 추정하지 않고 보류한다.
     groups = {}
-    for ticker in required:
+    for ticker in verified:
         suffix = _EXCHANGE_SUFFIX_RE.search(ticker) if market == "us" else None
         group = suffix.group(0) if suffix else market
         groups.setdefault(group, []).append(ticker)

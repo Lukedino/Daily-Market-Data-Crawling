@@ -6,10 +6,12 @@ D-02  업로드가 실패해도 커서(db_status.json)가 전진하면 그날은
 """
 from datetime import date, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
 
+import main as entry
 from data import ohlc_collector as oc
 from data import ohlc_db
 
@@ -75,22 +77,64 @@ def test_failed_upload_does_not_advance_the_cursor(harness):
     assert calls["update_status"] == 0 and calls["upload_status"] == 0   # 다음 실행이 같은 날을 다시 수집
 
 
-@pytest.mark.parametrize("fault", ["reported", "silent", "empty", "exception"])
-def test_one_of_hundred_incomplete_keeps_all_writes_and_cursor_untouched(harness, fault):
+@pytest.mark.parametrize("fault", ["empty", "exception"])
+def test_unusable_collection_writes_nothing_and_leaks_no_provider_text(harness, fault):
     calls, monkeypatch = harness
     tickers = [f"T{i:03}" for i in range(100)]
     monkeypatch.setattr(ohlc_db, "download_year_state", lambda *a, **k: "ok")
-    rows = pd.concat([_new_rows().assign(Ticker=t) for t in tickers[:99]], ignore_index=True)
     if fault == "exception":
         def collect(*a, **k):
             raise OSError("SYNTHETIC_SECRET")
     else:
-        collect = lambda *a, **k: (pd.DataFrame() if fault == "empty" else rows,
-                                    [tickers[-1]] if fault == "reported" else [])
+        collect = lambda *a, **k: (pd.DataFrame(), [])
     monkeypatch.setattr(oc, "fetch_ohlc_range", collect)
     with pytest.raises(oc.CollectionIncompleteError) as caught:
         oc.update_market("us", tickers=tickers, upload=True)
     assert "SYNTHETIC_SECRET" not in str(caught.value)
+    assert calls == {"append": 0, "upload_years": 0, "update_status": 0, "upload_status": 0}
+
+
+@pytest.mark.parametrize("fault", ["reported", "silent"])
+def test_one_of_hundred_missing_still_publishes_the_verified_ninety_nine(harness, fault):
+    """공급자는 매일 소수 종목을 돌려주지 않는다 — US 실측이 1,058 요청 중 1,053 수집이다.
+    검증된 행까지 버리면 수집이 영구히 멈춘다(2026-09-22 실제 장애). 못 받은 종목의
+    날짜는 게시되지 않고, 커서는 검증된 집합 기준으로만 전진한다."""
+    calls, monkeypatch = harness
+    tickers = [f"T{i:03}" for i in range(100)]
+    monkeypatch.setattr(ohlc_db, "download_year_state", lambda *a, **k: "ok")
+    rows = pd.concat([_new_rows().assign(Ticker=t) for t in tickers[:99]], ignore_index=True)
+    monkeypatch.setattr(oc, "fetch_ohlc_range",
+                        lambda *a, **k: (rows, [tickers[-1]] if fault == "reported" else []))
+    oc.update_market("us", tickers=tickers, upload=True)
+    assert calls == {"append": 1, "upload_years": 1, "update_status": 1, "upload_status": 1}
+
+
+def test_one_market_failure_does_not_stop_the_other(monkeypatch):
+    """market=all 은 시장마다 독립이다 — 2026-09-22 실행은 US 에서 죽어 크립토가
+    시작조차 못 했다. 실패는 여전히 잡을 실패시키되 남은 시장은 수집을 마친다."""
+    started = []
+
+    def update(market, upload):
+        started.append(market)
+        if market == "us":
+            raise oc.CollectionIncompleteError("collection_incomplete", {"T099"})
+    monkeypatch.setattr(oc, "backfill_new_tickers", lambda **kwargs: [])
+    monkeypatch.setattr(oc, "update_market", update)
+    with pytest.raises(oc.CollectionIncompleteError, match="collection_incomplete"):
+        entry.run_ohlc_update(SimpleNamespace(dry_run=False, market="all", upload_drive=True))
+    assert started == ["us", "crypto"]
+
+
+def test_mass_missing_is_a_collection_fault_and_still_writes_nothing(harness):
+    """소수 누락은 공급자 사정이지만 대량 누락은 수집 자체의 고장이다.
+    연도 파일 축소 가드와 같은 임계(5%)를 넘으면 기존처럼 중단한다."""
+    calls, monkeypatch = harness
+    tickers = [f"T{i:03}" for i in range(100)]
+    monkeypatch.setattr(ohlc_db, "download_year_state", lambda *a, **k: "ok")
+    rows = pd.concat([_new_rows().assign(Ticker=t) for t in tickers[:90]], ignore_index=True)
+    monkeypatch.setattr(oc, "fetch_ohlc_range", lambda *a, **k: (rows, []))
+    with pytest.raises(oc.CollectionIncompleteError, match="collection_incomplete"):
+        oc.update_market("us", tickers=tickers, upload=True)
     assert calls == {"append": 0, "upload_years": 0, "update_status": 0, "upload_status": 0}
 
 
