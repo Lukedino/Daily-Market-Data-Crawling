@@ -182,3 +182,26 @@ def test_a_wholesale_basis_change_still_stops_everything(local):
     candidate.attrs["ohlc_request"] = {"actions_complete": True, "action_tickers": []}
     with pytest.raises(db.PriceBasisError, match="price_basis_mismatch"):
         db.validate_price_basis(candidate, "us")
+
+
+def test_open_high_low_revisions_are_not_a_basis_change(local):
+    """야후는 Open·High·Low 를 사후에 제각각 수정한다 — 2026-09-24 실측 400종목에서
+    네 칸 비교는 69.5% 가 어긋났지만 Close 만은 1.5% 였다. 기준 변경은 네 칸을
+    같은 비율로 움직이므로 Close 로 잡힌다."""
+    tickers = [f"T{i:03}" for i in range(100)]
+    db.save_year(_many(tickers), "us", 2026)
+    candidate = _many(tickers)
+    candidate["High"] = 10.03                          # 전 종목 High 가 수정됐다
+    candidate["Low"] = 9.99
+    candidate.attrs["ohlc_request"] = {"actions_complete": True, "action_tickers": []}
+    db.validate_price_basis(candidate, "us")           # Close 가 같으니 통과
+
+
+def test_a_close_that_moved_across_the_board_is_still_caught(local):
+    tickers = [f"T{i:03}" for i in range(100)]
+    db.save_year(_many(tickers), "us", 2026)
+    candidate = _many(tickers)
+    candidate["Close"] = 9.5                           # 기준 자체가 바뀌었다
+    candidate.attrs["ohlc_request"] = {"actions_complete": True, "action_tickers": []}
+    with pytest.raises(db.PriceBasisError, match="price_basis_mismatch"):
+        db.validate_price_basis(candidate, "us")
