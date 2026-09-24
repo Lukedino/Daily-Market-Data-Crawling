@@ -1251,14 +1251,16 @@ def _incremental_cursor(frame: pd.DataFrame, tickers: list[str], failed: list[st
                    for day in observed_dates):
                 holed.add(ticker)
     if holed:
-        # 구멍이 있는 종목은 커서를 확정해 주지 못한다. 다만 그 하나 때문에 시장
-        # 전체 수집을 버리지는 않는다 — 그 날짜를 **통째로** 못 받은 종목은 이미
-        # 위에서 허용하고 있으므로, 일부라도 받은 종목을 더 엄하게 다루면 계약이
-        # 서로 어긋난다. 커서 기준에서 빼고 누락과 같은 임계로 판정한다.
-        # 종목 수가 적으면 임계도 작아 예전처럼 곧바로 중단된다.
+        # 구멍이 있는 종목은 커서를 확정해 주지 못하므로 기준에서 뺀다. 하지만
+        # 개수로 잡을 죽이지는 않는다 — 그 날짜를 **통째로** 못 받은 종목은 이미
+        # 위에서 허용하므로, 일부라도 받은 종목을 더 엄하게 다루면 계약이 서로
+        # 어긋난다. 대량 고장은 위의 collection_incomplete·empty_unverified 가
+        # 이미 잡고, 여기서 임계를 하나 더 두면 **공개 로그가 값을 싣지 않아
+        # 맞출 수가 없다**(2026-09-24 두 번 연속 이 게이트에서 멈췄다).
+        # 남는 종목이 하나도 없을 때만 수집 자체의 고장으로 본다.
         for ticker in holed:
             by_ticker.pop(ticker, None)
-        if not by_ticker or len(missing) + len(holed) > tolerated:
+        if not by_ticker:
             raise CollectionIncompleteError("session_unverified", sorted(holed))
         logger.warning("session_unverified_tolerated")
     # 일부 종목만 최근 날짜까지 왔다고 공통 max 커서를 앞당기지 않는다.

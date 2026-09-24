@@ -152,11 +152,12 @@ def test_lagging_foreign_calendar_does_not_publish_the_other_tickers_maximum(har
     assert cursors == [old] and calls["append"] == 1
 
 
-def test_same_calendar_internal_hole_is_unverified_not_holiday_or_delisting():
+def test_same_calendar_internal_hole_does_not_certify_that_ticker():
+    """구멍 난 종목은 커서를 확정해 주지 못한다 — 휴장/정지라고 추정하지 않는다.
+    다만 깨끗한 종목이 남아 있으면 그 기준으로 게시한다(계약 변경 2026-09-24)."""
     frame = pd.DataFrame({"Ticker": ["AAA"] * 3 + ["BBB"] * 2,
                           "Date": [date(2026, 1, n) for n in (5, 6, 7, 5, 7)]})
-    with pytest.raises(oc.CollectionIncompleteError, match="session_unverified"):
-        oc._incremental_cursor(frame, ["AAA", "BBB"], [], date(2026, 1, 5), "us")
+    assert oc._incremental_cursor(frame, ["AAA", "BBB"], [], date(2026, 1, 5), "us") == date(2026, 1, 7)
 
 
 def test_year_end_incomplete_retries_the_same_cursor_then_advances(tmp_path, monkeypatch):
@@ -328,19 +329,23 @@ def test_one_ticker_with_an_internal_hole_does_not_discard_the_market():
     assert oc._incremental_cursor(frame, tickers, [], date(2026, 1, 4), "us") == days[-1]
 
 
-def test_many_internal_holes_are_a_collection_fault_and_still_stop():
+def test_many_internal_holes_still_publish_from_the_clean_tickers():
+    """구멍 개수로 잡을 죽이지 않는다 — 공개 로그가 값을 싣지 않아 임계를 맞출
+    수가 없고(2026-09-24 두 번 연속 이 게이트에서 멈췄다), 대량 고장은 이미
+    collection_incomplete·empty_unverified 가 잡는다."""
     days = [date(2026, 1, n) for n in (5, 6, 7)]
     tickers = [f"T{i:03}" for i in range(100)]
-    frame = _holed_frame(tickers, {f"T{i:03}" for i in range(10)}, days)
-    with pytest.raises(oc.CollectionIncompleteError, match="session_unverified"):
-        oc._incremental_cursor(frame, tickers, [], date(2026, 1, 4), "us")
+    frame = _holed_frame(tickers, {f"T{i:03}" for i in range(40)}, days)
+    assert oc._incremental_cursor(frame, tickers, [], date(2026, 1, 4), "us") == days[-1]
 
 
-def test_holes_and_missing_tickers_share_one_threshold():
-    """구멍 3% + 누락 3% = 6% 로 임계(5%)를 넘는다 — 따로 세면 둘 다 통과해 버린다."""
-    days = [date(2026, 1, n) for n in (5, 6, 7)]
-    tickers = [f"T{i:03}" for i in range(100)]
-    present = tickers[:97]                       # 3종목은 아예 수집되지 않았다
-    frame = _holed_frame(present, {f"T{i:03}" for i in range(3)}, days)
+def test_every_ticker_holed_is_a_collection_fault():
+    """커서를 확정해 줄 종목이 하나도 남지 않으면 수집 자체의 고장이다.
+    ⚠️ 모든 종목이 **같은** 날을 빼면 그건 구멍이 아니라 휴장이다(그 날짜가
+    아무에게도 관측되지 않으므로). 서로 다른 날을 빼야 전부 구멍이 된다."""
+    days = [date(2026, 1, n) for n in (5, 6, 7, 8)]
+    frame = pd.DataFrame(
+        [{"Ticker": "AAA", "Date": d} for d in days if d != days[1]] +
+        [{"Ticker": "BBB", "Date": d} for d in days if d != days[2]])
     with pytest.raises(oc.CollectionIncompleteError, match="session_unverified"):
-        oc._incremental_cursor(frame, tickers, [], date(2026, 1, 4), "us")
+        oc._incremental_cursor(frame, ["AAA", "BBB"], [], date(2026, 1, 4), "us")
