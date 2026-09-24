@@ -47,6 +47,15 @@ class _CodeScan(ast.NodeVisitor):
             self._collect(_first_literal(node))
         self.generic_visit(node)
 
+    def visit_Assign(self, node):
+        # 클래스 속성으로 다는 경우: `code = "coverage_gap"`.
+        # cli_entry 가 getattr(error, "code") 로 먼저 읽으므로 이것도 진짜 코드다.
+        literal = isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
+        for target in node.targets:
+            if literal and isinstance(target, ast.Name) and target.id == "code":
+                self._collect(node.value.value)
+        self.generic_visit(node)
+
     def _collect(self, value):
         # 사람이 읽는 문장(`"FinanceDataReader를 설치하세요"`)은 코드가 아니다.
         if value and value.replace("_", "").isalnum() and value == value.lower() and " " not in value:

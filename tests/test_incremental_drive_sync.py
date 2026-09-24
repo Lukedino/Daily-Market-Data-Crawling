@@ -230,7 +230,7 @@ def test_upload_requires_explicit_receipt_for_year_and_metadata(tmp_path, monkey
             ohlc_db._upload_metadata(metadata, uploader)
 
 
-@pytest.mark.parametrize("fault", ["mismatch", "actions"])
+@pytest.mark.parametrize("fault", ["mismatch", "incomplete"])
 def test_unverified_basis_stops_before_save_upload_and_cursor(harness, fault):
     calls, monkeypatch = harness
     monkeypatch.setattr(ohlc_db, "download_year_state", lambda *a, **k: "absent")
@@ -242,12 +242,28 @@ def test_unverified_basis_stops_before_save_upload_and_cursor(harness, fault):
     if fault == "mismatch":
         candidate["Close"] = 2.
     else:
-        candidate.attrs["ohlc_request"] = {"actions_complete": True, "action_tickers": ["AAA"]}
+        # actions 를 못 받은 경우는 계속 보류한다 — 기준 변경을 판정할 근거가 없다.
+        candidate.attrs["ohlc_request"] = {"actions_complete": False, "action_tickers": []}
     monkeypatch.setattr(oc, "fetch_ohlc_range", lambda *a, **k: (candidate, []))
     with pytest.raises(ohlc_db.PriceBasisError):
         oc.update_market("us", upload=True)
     assert path.read_bytes() == before
     assert calls == {"append": 0, "upload_years": 0, "update_status": 0, "upload_status": 0}
+
+
+def test_dividend_in_the_window_no_longer_holds_the_whole_market(harness):
+    """배당·분할이 관측된 종목이 하나라도 있으면 시장 전체를 보류하던 계약을 바꿨다.
+    80거래일 표본에서 2거래일 이상 창에 배당이 없던 적이 0회라 US 는 영구 보류였다.
+    재조정된 값이 저장본과 달라도 그 종목만 overlap 비교에서 빠지고 게시는 진행된다."""
+    calls, monkeypatch = harness
+    monkeypatch.setattr(ohlc_db, "download_year_state", lambda *a, **k: "absent")
+    ohlc_db.save_year(_new_rows(), "us", date.today().year)
+    candidate = _new_rows()
+    candidate["Close"] = 0.998                      # auto_adjust 소급 재조정
+    candidate.attrs["ohlc_request"] = {"actions_complete": True, "action_tickers": ["AAA"]}
+    monkeypatch.setattr(oc, "fetch_ohlc_range", lambda *a, **k: (candidate, []))
+    oc.update_market("us", upload=True)
+    assert calls == {"append": 1, "upload_years": 1, "update_status": 1, "upload_status": 1}
 
 
 # ── KR 일별: 같은 불변식. KR 은 Marcap·Rank 과거값을 다시 받을 길이 없어 더 나쁘다 ──────────

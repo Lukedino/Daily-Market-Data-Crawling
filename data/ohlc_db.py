@@ -184,6 +184,10 @@ US 2024 사고는 −19.1% 였고 crypto 2026 사고는 −12.7% 였으므로 5%
 class CoverageShrinkError(RuntimeError):
     """저장하면 기존보다 종목 수가 크게 줄어드는 경우. 저장·업로드를 중단한다."""
 
+    # 메시지는 사람이 읽는 한글 f-string 이라 공개 artifact 에서 지워진다.
+    # cli_entry 가 읽는 .code 로 원인을 남긴다(없으면 원인 없는 operation_failed).
+    code = "coverage_shrink"
+
 
 class DriveSyncError(RuntimeError):
     """Drive 와의 동기화가 깨진 상태로는 저장·커서 갱신을 진행하지 않는다.
@@ -192,6 +196,8 @@ class DriveSyncError(RuntimeError):
     D-02  업로드 실패 → 커서(db_status.json)를 전진시키면 그날은 다시 수집되지 않는다.
     예외로 올려 프로세스를 비정상 종료시키면 워크플로의 실패 알림이 울린다.
     """
+
+    code = "drive_sync_failed"
 
 
 def _norm_tickers(values) -> set:
@@ -300,6 +306,8 @@ COVERAGE_DROP_PCT = 10.0
 class CoverageGapError(RuntimeError):
     """연도 파일 안에서 유니버스가 하루 만에 급감하는 경우."""
 
+    code = "coverage_gap"
+
 
 class PriceBasisError(RuntimeError):
     """가격 오류를 단정하지 않고, 조정 기준 미확인 후보의 게시를 보류한다."""
@@ -313,9 +321,16 @@ def validate_price_basis(df: pd.DataFrame, market: str, *, as_of: date | None = 
                          replace_tickers=()):
     """확정 과거 overlap과 원천 actions를 확인한다. 전체 이력의 기준 증명은 아니다."""
     request = df.attrs.get("ohlc_request")
-    if request is not None and (request.get("actions_complete") is not True
-                                or request.get("action_tickers")):
+    if request is not None and request.get("actions_complete") is not True:
+        # actions 자체를 못 받으면 기준 변경을 판정할 근거가 없다 — 이건 보류한다.
+        # (실측: US 503/503·크립토 157/157 이 True 라 충족 가능한 조건이다.)
         raise PriceBasisError("price_basis_unverified")
+    # 배당·분할이 관측된 종목은 auto_adjust 가 과거 봉을 소급 재조정하므로 overlap 이
+    # 어긋나는 것이 **정상**이다. 예전에는 그런 종목이 하나라도 있으면 시장 전체를
+    # 보류했는데, 80거래일 표본에서 2거래일 이상 창에 배당이 없던 적이 한 번도
+    # 없어 US 는 사실상 영구 보류였다. 그 종목만 overlap 비교에서 빼고, 나머지
+    # 99% 의 '예상 밖 변경' 감지는 그대로 남긴다.
+    action_tickers = set(request.get("action_tickers") or ()) if request else set()
     if df.empty:
         return
     incoming = df.copy()
@@ -330,6 +345,8 @@ def validate_price_basis(df: pd.DataFrame, market: str, *, as_of: date | None = 
         for key in old.index.intersection(new.index):
             if key[0] in replace_tickers:
                 continue  # 기존의 명시적인 Crypto 심볼 정정/purge 계약은 유지한다.
+            if key[0] in action_tickers:
+                continue  # 이 창에 배당·분할이 있었다 — 재조정은 예상된 변화다.
             # Crypto 당일 및 직전 UTC 일봉은 이전 실행에서 미완성이었을 수 있다.
             # 기존 7일 재조회에 의한 봉 완성을 가격 기준 변경으로 오인하지 않는다.
             if market == "crypto" and key[1] >= as_of - timedelta(days=1):

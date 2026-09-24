@@ -273,7 +273,13 @@ def run_ohlc_update(args):
                     upload=args.upload_drive,
                 )
             except Exception as error:
-                logger.error(f"[OhlcUpdate] {market.upper()} 실패 — 남은 시장은 계속한다")
+                # raise failures[0] 는 첫 시장의 예외만 올린다 — 두 번째 시장의
+                # 원인이 artifact 에서 통째로 사라지므로 시장마다 한 줄 남긴다.
+                code = getattr(error, "code", None)
+                if code is None and len(error.args) == 1:
+                    code = error.args[0]
+                logger.error("market_failed",
+                             extra={"failure_code": code if isinstance(code, str) else None})
                 failures.append(error)
         else:
             logger.info(f"[DryRun] {market.upper()} ohlc update 시뮬레이션")

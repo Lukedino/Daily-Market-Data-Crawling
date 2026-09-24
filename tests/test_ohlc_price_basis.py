@@ -77,11 +77,10 @@ def test_provider_actions_are_requested_and_observed_without_changing_stored_con
     result, failed = oc.fetch_ohlc_range(["AAA"], "2026-01-05", "2026-01-06")
     assert not failed and calls[0]["auto_adjust"] is True and calls[0]["actions"] is True
     assert result.iloc[0].Dividends == 0 and result.iloc[0].Splits == 1
-    if dividend or split:
-        with pytest.raises(db.PriceBasisError, match="price_basis_unverified"):
-            db.validate_price_basis(result, "us")
-    else:
-        db.validate_price_basis(result, "us")
+    # 액션이 있어도 게시는 막지 않는다 — 막으면 US 는 영구 보류다(80거래일 표본에서
+    # 2거래일 이상 창에 배당이 없던 적이 0회). 액션 종목만 overlap 비교에서 뺀다.
+    db.validate_price_basis(result, "us")
+    assert (result.attrs["ohlc_request"]["action_tickers"] == ["AAA"]) is bool(dividend or split)
 
 
 def test_actions_missing_is_not_certified_as_zero(local):
@@ -98,8 +97,8 @@ def test_capital_gains_action_also_holds_adjusted_candidate(local, monkeypatch):
     monkeypatch.setattr(oc.time, "sleep", lambda *a: None)
     result, failed = oc.fetch_ohlc_range(["AAA"], "2026-01-05", "2026-01-06")
     assert not failed
-    with pytest.raises(db.PriceBasisError, match="price_basis_unverified"):
-        db.validate_price_basis(result, "us")
+    db.validate_price_basis(result, "us")
+    assert result.attrs["ohlc_request"]["action_tickers"] == ["AAA"]
 
 
 def test_current_marketcap_is_never_backdated_to_the_latest_historical_row(monkeypatch):
@@ -134,3 +133,26 @@ def test_partially_missing_price_row_still_blocks_the_ticker():
     raw["Dividends"], raw["Stock Splits"] = 0., 0.
     with pytest.raises(oc.CollectionIncompleteError, match="price_values_unverified"):
         oc._finalize_ticker_frame(raw, "AAA")
+
+
+def test_action_ticker_is_exempt_from_overlap_but_others_are_not(local):
+    """auto_adjust 는 배당락 전 봉을 소급 재조정한다 — 실측 APH 0.99845·LRCX 0.99894.
+    그 종목의 overlap 불일치는 **예상된 변화**이므로 비교에서 빼되, 액션이 없는
+    종목의 예상 밖 변경은 그대로 price_basis_mismatch 로 잡아야 한다."""
+    db.save_year(rows(), "us", 2026)                      # 저장본 Close = 10.0
+    adjusted = rows(close=9.98)                           # 재조정된 후보
+    adjusted.attrs["ohlc_request"] = {"actions_complete": True, "action_tickers": ["AAA"]}
+    db.validate_price_basis(adjusted, "us")               # 면제 — 통과해야 한다
+
+    silent = rows(close=9.98)
+    silent.attrs["ohlc_request"] = {"actions_complete": True, "action_tickers": []}
+    with pytest.raises(db.PriceBasisError, match="price_basis_mismatch"):
+        db.validate_price_basis(silent, "us")
+
+
+def test_incomplete_actions_still_hold_the_candidate(local):
+    """actions 자체를 못 받으면 기준 변경을 판정할 근거가 없다 — 이건 계속 보류한다."""
+    frame = rows()
+    frame.attrs["ohlc_request"] = {"actions_complete": False, "action_tickers": ["AAA"]}
+    with pytest.raises(db.PriceBasisError, match="price_basis_unverified"):
+        db.validate_price_basis(frame, "us")
