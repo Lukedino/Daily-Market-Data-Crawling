@@ -336,6 +336,10 @@ def validate_price_basis(df: pd.DataFrame, market: str, *, as_of: date | None = 
     incoming = df.copy()
     incoming["Date"] = pd.to_datetime(incoming["Date"]).dt.date
     as_of = as_of or datetime.now(timezone.utc).date()
+    # 기준이 통째로 바뀐 것(예: 조정가↔원가)과 몇 종목의 소급 재조정을 구분한다.
+    # 전자는 파일을 오염시키므로 막아야 하지만, 후자로 시장 전체를 버리면
+    # 수집이 멈춘다. 종목 수로 세고 연도 파일 축소 가드와 같은 임계를 쓴다.
+    compared, mismatched = set(), set()
     for year in sorted({day.year for day in incoming["Date"]}):
         existing = load_year(market, year, strict=True)
         if existing.empty:
@@ -351,6 +355,7 @@ def validate_price_basis(df: pd.DataFrame, market: str, *, as_of: date | None = 
             # 기존 7일 재조회에 의한 봉 완성을 가격 기준 변경으로 오인하지 않는다.
             if market == "crypto" and key[1] >= as_of - timedelta(days=1):
                 continue
+            compared.add(key[0])
             for column in ("Open", "High", "Low", "Close"):
                 if column not in old or column not in new:
                     raise PriceBasisError("price_basis_unverified")
@@ -361,7 +366,14 @@ def validate_price_basis(df: pd.DataFrame, market: str, *, as_of: date | None = 
                 if not math.isfinite(before) or not math.isfinite(after):
                     raise PriceBasisError("price_basis_unverified")
                 if not math.isclose(before, after, rel_tol=1e-7, abs_tol=1e-8):
-                    raise PriceBasisError("price_basis_mismatch")
+                    mismatched.add(key[0])
+                    break
+    if mismatched:
+        # 비교한 종목 대비 비율로 판정한다 — 한 줌이면 놓친 소급 재조정이고,
+        # 대부분이면 공급자가 기준 자체를 바꾼 것이다.
+        if len(mismatched) > len(compared) * TICKER_SHRINK_TOLERANCE_PCT / 100.0:
+            raise PriceBasisError("price_basis_mismatch")
+        logger.warning("price_basis_mismatch_tolerated")
 
 
 def _preserve_missing_marketcap(existing: pd.DataFrame, incoming: pd.DataFrame) -> pd.DataFrame:

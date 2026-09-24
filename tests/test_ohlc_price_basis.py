@@ -156,3 +156,29 @@ def test_incomplete_actions_still_hold_the_candidate(local):
     frame.attrs["ohlc_request"] = {"actions_complete": False, "action_tickers": ["AAA"]}
     with pytest.raises(db.PriceBasisError, match="price_basis_unverified"):
         db.validate_price_basis(frame, "us")
+
+
+def _many(tickers, close=10.):
+    return pd.DataFrame({"Ticker": list(tickers), "Date": [date(2026, 1, 5)] * len(tickers),
+                         "Open": close, "High": close, "Low": close, "Close": close,
+                         "Volume": 10., "MarketCap": 1000.})
+
+
+def test_a_few_mismatched_tickers_do_not_discard_the_whole_market(local):
+    """기준이 통째로 바뀐 것과 몇 종목의 놓친 소급 재조정을 구분한다.
+    후자로 시장 전체를 버리면 수집이 멈춘다."""
+    tickers = [f"T{i:03}" for i in range(100)]
+    db.save_year(_many(tickers), "us", 2026)
+    candidate = _many(tickers)
+    candidate.loc[candidate["Ticker"].isin(tickers[:3]), "Close"] = 9.98   # 3/100
+    candidate.attrs["ohlc_request"] = {"actions_complete": True, "action_tickers": []}
+    db.validate_price_basis(candidate, "us")
+
+
+def test_a_wholesale_basis_change_still_stops_everything(local):
+    tickers = [f"T{i:03}" for i in range(100)]
+    db.save_year(_many(tickers), "us", 2026)
+    candidate = _many(tickers, close=9.98)          # 전 종목이 다르다
+    candidate.attrs["ohlc_request"] = {"actions_complete": True, "action_tickers": []}
+    with pytest.raises(db.PriceBasisError, match="price_basis_mismatch"):
+        db.validate_price_basis(candidate, "us")
