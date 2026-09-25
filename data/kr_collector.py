@@ -127,10 +127,93 @@ def read_krx_snapshot(*, request_get=None) -> pd.DataFrame:
 
 
 def validate_price_basis(frame: pd.DataFrame):
-    """KR adjusted Yahoo 후보를 FDR 기준과 임의로 섞어 저장하지 않는다."""
-    if frame.attrs.get("kr_price_basis", {}).get("provider") == "yfinance":
-        raise KrCollectionError("price_basis_unverified")
+    """KR Yahoo 후보는 FDR 저장본과 종목별로 대조된 것만 저장한다.
+
+    2026-09-22 계약은 provider=yfinance 를 무조건 보류했다 — 그러자 09-08 에 만든
+    자가 치유(FDR 장애일의 전량 폴백·다음날 갭 백필)가 거래일에도 항상 exit 1 이 됐다.
+    이제 컬렉터가 원시가(auto_adjust=False)로 받아 직전 공통 세션 종가를 FDR 저장본과
+    종목별로 대조하고(verify_against_reference), 일치한 종목만 verified=True 로 표시한다.
+    대조 안 된 프레임은 예전처럼 보류한다.
+    """
+    basis = frame.attrs.get("kr_price_basis", {})
+    if basis.get("provider") == "yfinance":
+        if basis.get("verified") is not True or frame.empty:
+            raise KrCollectionError("price_basis_unverified")
+        # 검증된 Yahoo 후보는 FDR 원천 일자 증명(krx_snapshot)이 없다 — 여러 날짜(갭 백필)일 수
+        # 있으므로 날짜가 모두 유효한지만 본다. 종목별 가격 대조는 verify_against_reference 가 했다.
+        dates = pd.to_datetime(frame["Date"], errors="coerce")
+        if dates.isna().any():
+            raise KrCollectionError("price_basis_unverified")
+        return
     snapshot_source_date(frame)
+
+
+# ── yfinance 후보의 가격 기준 검증 ─────────────────────────────────
+_VERIFY_LOOKBACK_DAYS = 10   # 조회 창을 앞으로 넓혀 직전 공통 세션(대조용)을 함께 받는다
+
+
+def krx_tick_size(price: float) -> float:
+    """KRX 호가 단위(2023-01 개편). 원시가 대조의 허용 오차로 쓴다."""
+    if price < 2_000:
+        return 1.0
+    if price < 5_000:
+        return 5.0
+    if price < 20_000:
+        return 10.0
+    if price < 50_000:
+        return 50.0
+    if price < 200_000:
+        return 100.0
+    if price < 500_000:
+        return 500.0
+    return 1_000.0
+
+
+def verify_against_reference(frame: pd.DataFrame, reference: Optional[pd.DataFrame],
+                             keep_from: Optional[date] = None) -> pd.DataFrame:
+    """yfinance 원시가 프레임을 FDR 저장본(reference: Code·Date·Close)과 종목별로 대조한다.
+
+    - 종목의 겹치는 (Code, Date) 종가가 **전부** 1호가 안이면 그 종목을 채택한다.
+    - 하나라도 어긋나면(rejected) 또는 겹치는 세션이 없으면(unmatched) 그 종목은 보류한다.
+    - keep_from 이 있으면 그 날짜 이상의 행만 남긴다(대조용으로 받은 과거 세션 제거).
+    reference 가 없으면 대조하지 못한 것이므로 verified=False 로 돌려준다(저장 보류).
+    """
+    basis = dict(frame.attrs.get("kr_price_basis", {}))
+    if frame.empty:
+        return frame
+    work = frame.copy()
+    work["Date"] = pd.to_datetime(work["Date"])
+    work["Code"] = work["Code"].astype(str).str.zfill(6)
+    if reference is None or reference.empty or not {"Code", "Date", "Close"}.issubset(reference.columns):
+        logger.warning("[KrCollector] 가격 기준 대조 불가 — 저장본 없음 (후보 보류)")
+        out = work if keep_from is None else work[work["Date"].dt.date >= keep_from]
+        out = out.reset_index(drop=True)
+        out.attrs["kr_price_basis"] = {**basis, "verified": False, "reason": "reference_unavailable"}
+        return out
+    ref = reference[["Code", "Date", "Close"]].copy()
+    ref["Date"] = pd.to_datetime(ref["Date"])
+    ref["Code"] = ref["Code"].astype(str).str.zfill(6)
+    ref = ref.dropna(subset=["Close"]).drop_duplicates(subset=["Code", "Date"], keep="last")
+    joined = work.merge(ref.rename(columns={"Close": "_ref_close"}), on=["Code", "Date"], how="inner")
+    verified, rejected = set(), set()
+    for code, group in joined.groupby("Code"):
+        diff = (group["Close"].astype(float) - group["_ref_close"].astype(float)).abs()
+        tol = group["_ref_close"].astype(float).map(krx_tick_size) + 1e-6
+        (verified if bool((diff <= tol).all()) else rejected).add(code)
+    all_codes = set(work["Code"])
+    unmatched = all_codes - verified - rejected
+    out = work[work["Code"].isin(verified)]
+    if keep_from is not None:
+        out = out[out["Date"].dt.date >= keep_from]
+    out = out.reset_index(drop=True)
+    out.attrs["kr_price_basis"] = {**basis, "verified": True, "reference_provider": "fdr_krx_cache",
+                                   "codes_verified": len(verified), "codes_rejected": len(rejected),
+                                   "codes_unmatched": len(unmatched)}
+    logger.info(f"[KrCollector] 가격 기준 대조: 일치 {len(verified)} / 불일치 {len(rejected)} / "
+                f"대조 불가 {len(unmatched)} 종목 → {len(out)}행 채택")
+    if rejected:
+        logger.warning("price_basis_mismatch_tolerated")
+    return out
 
 
 def collect_daily() -> pd.DataFrame:
@@ -160,6 +243,7 @@ def collect_missing_today(
     missing_codes: list[str],
     code_meta: dict[str, dict],
     target_date: Optional[date] = None,
+    reference: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     """
     FDR StockListing 누락 종목을 yfinance로 보완 수집 (당일 단일 거래일).
@@ -175,12 +259,14 @@ def collect_missing_today(
     Returns:
         marcap 스키마 DataFrame (Marcap/Rank=NaN)
     """
-    return _collect_yfinance_day(missing_codes, code_meta, target_date, "누락 종목 보완")
+    return _collect_yfinance_day(missing_codes, code_meta, target_date, "누락 종목 보완",
+                                 reference=reference)
 
 
 def collect_daily_fallback(
     code_meta: dict[str, dict],
     target_date: Optional[date] = None,
+    reference: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     """
     FDR StockListing이 통째로 죽었을 때 당일 **전종목** 스냅샷을 yfinance로 수집.
@@ -203,7 +289,7 @@ def collect_daily_fallback(
         marcap 스키마 DataFrame (Marcap/Rank=NaN — yfinance에 시총 정보 없음)
     """
     return _collect_yfinance_day(sorted(code_meta), code_meta, target_date,
-                                 "FDR 폴백 전종목")
+                                 "FDR 폴백 전종목", reference=reference)
 
 
 def _collect_yfinance_day(
@@ -211,6 +297,7 @@ def _collect_yfinance_day(
     code_meta: dict[str, dict],
     target_date: Optional[date],
     label: str,
+    reference: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     """
     지정한 종목들의 **단일 거래일** 시세를 yfinance로 수집 (marcap 스키마).
@@ -228,8 +315,9 @@ def _collect_yfinance_day(
         raise ImportError("yfinance를 설치하세요: pip install yfinance")
 
     tgt = target_date or date.today()
-    # yfinance는 end exclusive — 거래일 + 1일 윈도우, 안전 마진 위해 -1 ~ +1
-    start_str = (tgt - timedelta(days=1)).strftime("%Y-%m-%d")
+    # yfinance는 end exclusive. 창을 앞으로 넓혀 직전 공통 세션도 받는다 — 그 세션의
+    # 종가를 FDR 저장본과 대조해야 이 후보를 저장할 수 있다(verify_against_reference).
+    start_str = (tgt - timedelta(days=_VERIFY_LOOKBACK_DAYS)).strftime("%Y-%m-%d")
     end_str = (tgt + timedelta(days=1)).strftime("%Y-%m-%d")
 
     # yf_ticker 구성 (메타 없으면 KOSPI(.KS) 기본)
@@ -256,7 +344,7 @@ def _collect_yfinance_day(
                 batch,
                 start=start_str,
                 end=end_str,
-                auto_adjust=True,
+                auto_adjust=False,   # 원시가 — FDR 저장본과 같은 기준으로 대조한다
                 progress=False,
                 group_by="ticker",
                 threads=True,
@@ -285,9 +373,9 @@ def _collect_yfinance_day(
                 if df_t["Date"].dt.tz is not None:
                     df_t["Date"] = df_t["Date"].dt.tz_localize(None)
 
-                # target_date에 해당하는 행만 선택 (보완 목적상 당일 단일행)
-                df_t = df_t[df_t["Date"].dt.date == tgt]
-                if df_t.empty:
+                # 대상일 이후 행은 버린다. 그 이전(대조용 직전 세션)은 검증 뒤에 떼어 낸다.
+                df_t = df_t[df_t["Date"].dt.date <= tgt]
+                if df_t.empty or not (df_t["Date"].dt.date == tgt).any():
                     continue
 
                 df_t["Code"] = code
@@ -320,7 +408,8 @@ def _collect_yfinance_day(
 
     result = pd.concat(all_rows, ignore_index=True)
     result = result.drop_duplicates(subset=["Code", "Date"], keep="last")
-    result.attrs["kr_price_basis"] = {"provider": "yfinance", "auto_adjust": True}
+    result.attrs["kr_price_basis"] = {"provider": "yfinance", "auto_adjust": False}
+    result = verify_against_reference(result, reference, keep_from=tgt)
     logger.info(f"[KrCollector] {label} 완료: {len(result)}종목")
     return result
 
@@ -330,7 +419,8 @@ def _collect_yfinance_day(
 # ══════════════════════════════════════════════════════════════════════════════
 
 def collect_backfill(start_date: str, end_date: str,
-                     fallback_meta: Optional[dict[str, dict]] = None) -> pd.DataFrame:
+                     fallback_meta: Optional[dict[str, dict]] = None,
+                     reference: Optional[pd.DataFrame] = None) -> pd.DataFrame:
     """
     yfinance로 과거 기간 전종목 OHLCV 수집.
     - FDR StockListing으로 현재 종목 목록 확보 (Code + Name + Market)
@@ -377,9 +467,10 @@ def collect_backfill(start_date: str, end_date: str,
         f"{len(universe)}종목"
     )
 
-    # yfinance end는 exclusive
+    # yfinance end는 exclusive. 시작은 앞으로 넓혀 직전 공통 세션(대조용)을 함께 받는다.
     end_dt = end_dt_obj + timedelta(days=1)
     end_str = end_dt.strftime("%Y-%m-%d")
+    fetch_start = (start_dt_obj - timedelta(days=_VERIFY_LOOKBACK_DAYS)).strftime("%Y-%m-%d")
 
     all_rows = []
     tickers_yf = universe["yf_ticker"].tolist()
@@ -393,9 +484,9 @@ def collect_backfill(start_date: str, end_date: str,
         try:
             raw = yf.download(
                 batch_yf,
-                start=start_date,
+                start=fetch_start,
                 end=end_str,
-                auto_adjust=True,
+                auto_adjust=False,   # 원시가 — FDR 저장본과 같은 기준으로 대조한다
                 progress=False,
                 group_by="ticker",
                 threads=True,
@@ -463,7 +554,11 @@ def collect_backfill(start_date: str, end_date: str,
     result = pd.concat(all_rows, ignore_index=True)
     result = result.drop_duplicates(subset=["Code", "Date"], keep="last")
     result = result.sort_values(["Date", "Code"]).reset_index(drop=True)
-    result.attrs["kr_price_basis"] = {"provider": "yfinance", "auto_adjust": True}
+    result.attrs["kr_price_basis"] = {"provider": "yfinance", "auto_adjust": False}
+    result = verify_against_reference(result, reference, keep_from=start_dt_obj.date())
+    if result.empty:
+        logger.warning(f"[KrCollector] backfill 대조 통과 종목 없음: {start_date}~{end_date}")
+        return result
 
     logger.info(
         f"[KrCollector] backfill 완료: {len(result):,}행 "

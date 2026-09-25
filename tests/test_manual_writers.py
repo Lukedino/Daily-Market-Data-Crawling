@@ -103,7 +103,7 @@ def test_actual_kr_yahoo_price_guard_precedes_backfill_save(monkeypatch):
     frame = pd.DataFrame({"Code": ["000001"], "Date": [pd.Timestamp("2026-01-05")]})
     frame.attrs["kr_price_basis"] = {"provider": "yfinance", "auto_adjust": True}
     monkeypatch.setattr(kr_db, "ensure_year_baselines", lambda *args, **kwargs: {2026: "absent"})
-    monkeypatch.setattr(kr_collector, "collect_backfill", lambda *args: frame)
+    monkeypatch.setattr(kr_collector, "collect_backfill", lambda *args, **kwargs: frame)
     monkeypatch.setattr(kr_db, "append_rows", lambda *args, **kwargs: pytest.fail("unverified price stored"))
     with pytest.raises(kr_collector.KrCollectionError, match="price_basis_unverified"):
         main.run_kr_backfill(SimpleNamespace(dry_run=False, upload_drive=False,

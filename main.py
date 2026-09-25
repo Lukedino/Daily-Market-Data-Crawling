@@ -409,7 +409,9 @@ def run_kr_daily(args, today=None):
     # 1b. 폴백용 종목 목록 — FDR이 죽어도 쓸 수 있도록 미리 뽑아둔다.
     #     갭 backfill(_build_universe)과 당일 폴백이 둘 다 FDR에 의존하고 있어서
     #     2026-09-08에는 폴백 경로 자체가 같은 404로 막혀 있었다.
-    fallback_meta = _recent_code_meta(kr_db.load_year(current_year, strict=True), today)
+    # 저장본은 폴백 유니버스이자 yfinance 후보의 가격 기준 대조 기준(reference)이다.
+    reference = kr_db.load_year(current_year, strict=True)
+    fallback_meta = _recent_code_meta(reference, today)
     if fallback_meta:
         logger.info(f"[KrDaily] 폴백 유니버스 확보: {len(fallback_meta)}종목 (기존 parquet)")
 
@@ -434,7 +436,8 @@ def run_kr_daily(args, today=None):
                 f"({len(bdays)} 거래일) → yfinance backfill 시작"
             )
             gap_df = kr_collector.collect_backfill(str(gap_start), str(yesterday),
-                                                   fallback_meta=fallback_meta)
+                                                   fallback_meta=fallback_meta,
+                                                   reference=reference)
             if not gap_df.empty:
                 kr_collector.validate_price_basis(gap_df)
                 gap_updated = kr_db.append_rows(gap_df, ohlc_only=True)
@@ -457,7 +460,7 @@ def run_kr_daily(args, today=None):
         # 빈 결과 호환경로의 후보만 받는다. 아래 가격 기준 검증 전에는 저장하지 않는다.
         logger.warning("[KrDaily] FDR 스냅샷 0건 → yfinance 전량 폴백 시도")
         if fallback_meta:
-            df = kr_collector.collect_daily_fallback(fallback_meta, today)
+            df = kr_collector.collect_daily_fallback(fallback_meta, today, reference=reference)
             used_fallback = not df.empty
         else:
             logger.error("[KrDaily] 폴백 유니버스도 비어 있음 (기존 parquet 없음)")
@@ -505,7 +508,8 @@ def run_kr_daily(args, today=None):
                     }
                     for code in missing_codes
                 }
-                supp = kr_collector.collect_missing_today(missing_codes, code_meta, today)
+                supp = kr_collector.collect_missing_today(missing_codes, code_meta, today,
+                                                         reference=reference)
                 if not supp.empty:
                     kr_collector.validate_price_basis(supp)
                     df = pd.concat([df, supp], ignore_index=True)
@@ -585,7 +589,17 @@ def run_kr_backfill(args):
         logger.error("[KrBackfill] 기준 연도 파일 확인 실패 — 수집/저장/업로드 없이 중단")
         sys.exit(1)
 
-    df = kr_collector.collect_backfill(args.start_date, args.end_date)
+    # 수동 백필도 대조 기준이 필요하다 — 요청 구간이 걸친 연도의 저장본을 합친다.
+    reference_frames = []
+    for year in range(start_date.year, end_date.year + 1):
+        try:
+            frame = kr_db.load_year(year, strict=True)
+        except Exception:
+            frame = pd.DataFrame()
+        if frame is not None and not frame.empty:
+            reference_frames.append(frame)
+    reference = pd.concat(reference_frames, ignore_index=True) if reference_frames else None
+    df = kr_collector.collect_backfill(args.start_date, args.end_date, reference=reference)
     if df.empty:
         logger.error("[KrBackfill] 수집 실패 → 종료")
         sys.exit(1)

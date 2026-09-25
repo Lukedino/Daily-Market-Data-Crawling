@@ -86,7 +86,7 @@ def test_universe_without_fallback_returns_empty_when_fdr_is_dead():
 def test_daily_fallback_requests_every_code_not_just_missing_ones(monkeypatch):
     seen = {}
 
-    def _spy(codes, code_meta, target_date, label):
+    def _spy(codes, code_meta, target_date, label, reference=None):
         seen["codes"] = list(codes)
         seen["label"] = label
         return pd.DataFrame({"Code": codes})
@@ -101,7 +101,7 @@ def test_daily_fallback_requests_every_code_not_just_missing_ones(monkeypatch):
 def test_daily_fallback_passes_target_date_through(monkeypatch):
     seen = {}
     monkeypatch.setattr(kr_collector, "_collect_yfinance_day",
-                        lambda codes, code_meta, target_date, label:
+                        lambda codes, code_meta, target_date, label, reference=None:
                             seen.update(d=target_date) or pd.DataFrame())
 
     kr_collector.collect_daily_fallback(_DB_META, date(2026, 9, 8))
@@ -118,7 +118,7 @@ def test_missing_today_still_requests_only_the_missing_codes(monkeypatch):
     """기존 '누락 종목 보완' 경로는 전량으로 바뀌면 안 된다 — 회귀 방지."""
     seen = {}
     monkeypatch.setattr(kr_collector, "_collect_yfinance_day",
-                        lambda codes, code_meta, target_date, label:
+                        lambda codes, code_meta, target_date, label, reference=None:
                             seen.update(codes=list(codes)) or pd.DataFrame())
 
     kr_collector.collect_missing_today(["247540"], _DB_META, date(2026, 9, 8))
@@ -210,7 +210,7 @@ def test_exits_nonzero_when_fdr_and_yfinance_both_yield_nothing(kr_env, monkeypa
     """조용히 return하면 GHA가 success로 끝나 실패 알림이 뜰 수가 없다."""
     monkeypatch.setattr(kr_collector, "collect_daily", lambda: pd.DataFrame())
     monkeypatch.setattr(kr_collector, "collect_daily_fallback",
-                        lambda code_meta, target_date=None: pd.DataFrame())
+                        lambda code_meta, target_date=None, reference=None: pd.DataFrame())
 
     with pytest.raises(SystemExit) as exc:
         kr_main.run_kr_daily(_ARGS)
@@ -223,7 +223,7 @@ def test_empty_fdr_yahoo_candidate_holds_without_price_basis(kr_env, monkeypatch
     """빈 FDR 대역의 Yahoo 후보는 받아도 가격 기준 증명 전에는 저장하지 않는다."""
     monkeypatch.setattr(kr_collector, "collect_daily", lambda: pd.DataFrame())
     monkeypatch.setattr(kr_collector, "collect_daily_fallback",
-                        lambda code_meta, target_date=None: _today_row())
+                        lambda code_meta, target_date=None, reference=None: _today_row())
 
     with pytest.raises(kr_collector.KrCollectionError, match="price_basis_unverified"):
         kr_main.run_kr_daily(_ARGS)
@@ -235,7 +235,7 @@ def test_fallback_receives_universe_built_from_existing_parquet(kr_env, monkeypa
     seen = {}
     monkeypatch.setattr(kr_collector, "collect_daily", lambda: pd.DataFrame())
 
-    def _fallback(code_meta, target_date=None):
+    def _fallback(code_meta, target_date=None, reference=None):
         seen["meta"] = code_meta
         return _today_row()
 
