@@ -1,10 +1,14 @@
 name: "Financials Update — US/Crypto 재무 데이터"
 
 on:
-  schedule:
-    # 매월 1일 UTC 01:00 (KST 10:00) — 월 1회 스냅샷 (ratios 기관보유 추세는 월간 스냅샷 3개 기준)
-    # 주의: 옛 '0 1 1-7 * 1'(첫째 월요일 의도)은 cron OR 규칙으로 1~7일 매일 + 매주 월요일 실행됐음 (2026-09-04 발견)
-    - cron: '0 1 1 * *'
+  # 예약 실행은 Personal Assistant 저장소의 apps/orchestrator/config/gha-schedules.json
+  # (financials-monthly: 매월 1일 01:00 UTC = 10:00 KST, market=all)이 Cloud Scheduler tick 으로
+  # workflow_dispatch 를 호출해 깨운다(2026-09-25 이관). 월 1회 스냅샷(ratios 기관보유 추세는 월간 3개 기준).
+  # 정시가 필요한 이유: KR 단계는 kr-daily 저장일 == 실행 시점 KRX max_work_dt 여야 통과하는데
+  # max_work_dt 는 거래일 장 마감 후(15:30~21:4x KST) 그날로 바뀐다. GitHub schedule 은 큐 지연으로
+  # KR 단계가 12:00~16:30 에 시작해 이 전환을 넘길 수 있었다.
+  # cron 을 되살리려면 그쪽 항목을 enabled:false 로 바꾼 뒤 여기에 schedule: 블록을 복원한다
+  # (옛 '0 1 1-7 * 1' 은 cron OR 규칙으로 1~7일 매일 + 매주 월요일이었다 — 되살릴 땐 '0 1 1 * *').
   workflow_dispatch:
     inputs:
       market:
