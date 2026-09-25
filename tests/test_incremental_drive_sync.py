@@ -186,7 +186,8 @@ def test_year_end_incomplete_retries_the_same_cursor_then_advances(tmp_path, mon
     assert not ohlc_db.local_path("us", 2027).exists()
     complete[0] = True
     oc.update_market("us", ["AAA", "BBB"], upload=False)
-    assert starts == ["2026-12-31", "2026-12-31"]
+    # 재시도는 같은 커서에서 출발한다 — 창 폭(US_LOOKBACK_DAYS)이 아니라 커서 불변이 요점
+    assert starts == [oc.incremental_start_date("us", date(2026, 12, 31)).isoformat()] * 2
     assert ohlc_db.load_status()["us"]["last_updated"] == "2027-01-02"
 
 
@@ -391,6 +392,18 @@ def test_the_hold_gives_up_after_a_week_so_the_window_cannot_grow_forever():
     by = {f"T{i:03}": ([days[0], days[2]] if i else days) for i in range(20)}
     cursor = oc._incremental_cursor(_coverage_frame(by), list(by), [], stale, "us")
     assert cursor == days[2], "탈출 후에는 정상 커서로 전진한다"
+
+
+def test_an_abandoned_sparse_date_inside_the_lookback_does_not_hold_the_cursor_again():
+    """DM-05 (2026-09-26): 재조회 창이 1주가 되면 포기한 결손 날짜가 매일 창 안에 남는다.
+    커서가 이미 지나간 날짜를 다시 붙잡으면 커서가 그 자리에 영영 멈춘다(오늘 봉을
+    받고도 last_updated 가 전진하지 않는다)."""
+    days = [date.today() - timedelta(days=n) for n in (3, 2, 1)]
+    sparse_day = days[1]
+    by = {f"T{i:03}": ([days[0], days[2]] if i else days) for i in range(20)}
+    # 커서가 이미 결손 날짜를 지났다(전날 포기·게시) — 오늘 봉까지 전진해야 한다.
+    cursor = oc._incremental_cursor(_coverage_frame(by), list(by), [], sparse_day, "us")
+    assert cursor == days[2]
 
 
 def test_sparse_dates_are_kept_out_of_what_gets_published(harness):

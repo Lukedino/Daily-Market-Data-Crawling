@@ -1200,11 +1200,22 @@ save_year()가 (Ticker, Date) 중복을 keep="last"로 정리하므로 최신 �
 US도 직전 저장 세션을 함께 조회해 유한한 과거 가격의 조정 기준 불일치를 확인한다."""
 
 
+US_LOOKBACK_DAYS = 7
+"""US 증분 조회가 매번 다시 받는 일수 (DM-05, 2026-09-26).
+공급자는 매일 소수 종목(실측 0.47%)을 돌려주지 않고 그 누락은 허용된다
+(collection_incomplete_tolerated). 창이 직전 저장 세션 하나뿐이면 커서가 그
+종목의 날짜를 지나 다시 요청되지 않아 **종목 단위 영구 구멍**이 된다 — 크립토가
+2026-08-31 에 겪어 1주 창으로 고친 것과 같은 결함이다. 1주를 매번 다시 받으면
+그 사이 공급자가 돌려준 봉이 (Ticker, Date) keep="last" 병합으로 채워진다.
+요청 수는 같고(배치는 종목 단위) 봉 수만 5배라 비용은 미미하다. 일주일 넘게
+안 오는 종목은 사실상 상장폐지다."""
+
+
 def incremental_start_date(market: str, last_date: date) -> date:
-    """Crypto 7일 유지, US는 직전 저장 거래일도 받아 가격 기준을 비교한다."""
+    """Crypto·US 모두 최근 1주를 다시 받는다 — 늦게 나온 봉·허용된 누락의 자가 치유."""
     if market == "crypto":
         return last_date - timedelta(days=CRYPTO_LOOKBACK_DAYS - 1)
-    return last_date
+    return last_date - timedelta(days=US_LOOKBACK_DAYS - 1)
 
 
 SPARSE_SESSION_MIN_PCT = 50.0
@@ -1292,7 +1303,11 @@ def _incremental_cursor(frame: pd.DataFrame, tickers: list[str], failed: list[st
     cursor = max(last_date, min(max(days) for days in by_ticker.values()))
     # 공급자가 대부분 종목에 주지 않은 날짜를 커서가 지나가면 그 날짜는 다시
     # 요청되지 않아 영구 결손이 된다. 그 앞에서 멈춰 다음 실행이 다시 받게 한다.
-    sparse = [day for day in sparse_session_dates(frame) if day <= cursor]
+    # 커서가 이미 지나간(게시했거나 포기한) 날짜는 여기서 다시 붙잡지 않는다 — 재조회
+    # 창이 1주라 포기한 결손 날짜가 매일 창 안에 남는데, 그때마다 붙잡으면 커서가
+    # 그 자리에 영영 멈춘다. 그 날짜는 공급자가 채워 주면 병합으로 들어오고,
+    # 여전히 희소하면 게시에서만 빠진다(sparse_session_excluded).
+    sparse = [day for day in sparse_session_dates(frame) if last_date < day <= cursor]
     if sparse:
         if (date.today() - last_date).days <= MAX_CURSOR_HOLD_DAYS:
             logger.warning("cursor_held_for_sparse_session")

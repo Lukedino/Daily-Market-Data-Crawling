@@ -32,5 +32,15 @@ def test_crypto_lookback_covers_the_2026_08_31_hole():
     assert start <= date(2026, 8, 31) < date(2026, 9, 3)
 
 
-def test_us_start_includes_last_saved_session_for_basis_check():
-    assert oc.incremental_start_date("us", date(2026, 9, 3)) == date(2026, 9, 3)
+def test_us_start_covers_last_week_like_crypto():
+    """DM-05 (2026-09-26): 허용된 누락 종목의 날짜가 종목 단위 영구 구멍이 되지 않도록
+    US 도 1주를 다시 받는다. 직전 저장 세션은 여전히 창 안이라 기준 비교도 그대로다."""
+    assert oc.US_LOOKBACK_DAYS == 7
+    start = oc.incremental_start_date("us", date(2026, 9, 3))
+    assert start == date(2026, 8, 28) and start < date(2026, 9, 3)
+
+
+def test_us_window_recovers_a_tolerated_miss_from_the_previous_run():
+    """어제 5% 안에서 빠진 종목의 봉(어제 날짜)이 오늘 창 안에 있어야 다시 요청된다."""
+    yesterday, today = date(2026, 9, 2), date(2026, 9, 3)
+    assert oc.incremental_start_date("us", today) <= yesterday
