@@ -17,3 +17,5 @@ google-auth-httplib2==0.4.2
 google-auth-oauthlib==1.4.1
 tqdm==4.70.0
 python-dotenv==1.2.3
+# KRX trading calendar (financial_holidays("XKRX")) — KIS-Trading trader/constraints.in 과 같은 핀
+holidays==0.105

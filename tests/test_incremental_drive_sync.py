@@ -270,7 +270,7 @@ def test_dividend_in_the_window_no_longer_holds_the_whole_market(harness):
 from types import SimpleNamespace
 
 import main as kr_main
-from data import kr_db
+from data import kr_db, krx_calendar
 
 
 def _kr_rows(year=2026):
@@ -299,6 +299,7 @@ class _Uploader:
 def kr_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(kr_db, "local_path", lambda year: tmp_path / f"marcap-{year}.parquet")
     monkeypatch.setitem(kr_db.config.DRIVE_PATHS, "ohlc_kr", "data/ohlc/kr")
+    monkeypatch.setattr(krx_calendar, "session_status", lambda day: ("open", ""))   # 실행일이 휴장일이어도 날짜에 매이지 않게
     return tmp_path
 
 

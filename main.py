@@ -358,13 +358,16 @@ def _recent_code_meta(prior, today, days: int = 7) -> dict:
     }
 
 
-def run_kr_daily(args):
+def run_kr_daily(args, today=None):
     """
     KR daily 수집 플로우:
+    0. KRX 휴장일이면 아무것도 하지 않는다(exit 0) — 2026-09-25(추석) 실패의 원인
     1. Drive에서 현재 연도 parquet + status 다운로드
-    2. last_date 확인 → 어제까지 갭이 있으면 yfinance backfill 자동 수행
+    2. last_date 확인 → 어제까지 **거래일** 갭이 있으면 yfinance backfill 자동 수행
     3. 같은 원천 일자의 FDR 스냅샷 수집 (실제 원천 오류는 즉시 보류)
     4. 저장 + Drive 업로드
+
+    today 는 테스트 주입용(기본 date.today()) — collect_kr_financials(today=) 와 같은 관례.
 
     ⚠️ 3번이 끝내 0건이면 sys.exit(1)로 끝낸다. 2026-09-08에는 조용히 return해서
        GHA가 success로 끝났고, 그래서 데이터 구멍이 하류(KIS EOD 분석)의 알림으로만
@@ -375,15 +378,27 @@ def run_kr_daily(args):
         return
 
     from datetime import date, timedelta
-    from data import kr_collector, kr_db
+    from data import kr_collector, kr_db, krx_calendar
     import pandas as pd
 
     if args.dry_run:
         logger.info("[KrDaily] dry-run: 수집 시뮬레이션 (저장 없음)")
         return
 
-    today = date.today()
+    today = today or date.today()
     current_year = today.year
+
+    # 0. 휴장일에는 수집할 세션이 없다. 2026-09-25(추석): 어제(09-24, 평일)가 저장본
+    #    마지막 날짜(09-23)보다 뒤라 갭으로 판정 → yfinance 백필 → 야후는 휴장 구간에
+    #    직전 거래일 봉을 돌려주므로 결과가 비어 있지 않음 → 가격 기준 검증이 yfinance
+    #    출처를 거부 → exit 1(실패 알림). 휴장일은 갭도 수집 대상도 아니다.
+    session, reason = krx_calendar.session_status(today)
+    if session == "closed":
+        logger.info("kr_market_closed")
+        logger.info(f"[KrDaily] KRX 휴장({reason}) — 수집 없음")
+        return
+    if session == "unknown":
+        logger.warning("kr_calendar_unavailable")
 
     # 1. Existing local files do not prove that the remote baseline is current.
     baseline_states = kr_db.ensure_year_baselines([current_year], download=args.upload_drive)
@@ -409,12 +424,14 @@ def run_kr_daily(args):
     yesterday = today - timedelta(days=1)
 
     if gap_start <= yesterday:
-        # 주말만 있는 구간인지 확인 (평일이 없으면 스킵)
-        bdays = pd.bdate_range(str(gap_start), str(yesterday))
+        # 주말·KRX 휴장일만 있는 구간이면 갭이 아니다. 예전엔 pd.bdate_range(평일)로
+        # 판정해 추석 다음 날 09-24 를 갭으로 세었다(위 0 단계 주석). 달력을 모르는
+        # 해는 평일을 거래일로 본다 — 기존 동작.
+        bdays = krx_calendar.trading_days(gap_start, yesterday)
         if len(bdays) > 0:
             logger.info(
                 f"[KrDaily] 갭 감지: {gap_start} ~ {yesterday} "
-                f"({len(bdays)} 영업일) → yfinance backfill 시작"
+                f"({len(bdays)} 거래일) → yfinance backfill 시작"
             )
             gap_df = kr_collector.collect_backfill(str(gap_start), str(yesterday),
                                                    fallback_meta=fallback_meta)

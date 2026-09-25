@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 
 import main
-from data import kr_collector, kr_db
+from data import kr_collector, kr_db, krx_calendar
 
 
 def rows(*items, **overrides):
@@ -57,6 +57,7 @@ def db(tmp_path, monkeypatch):
     monkeypatch.setattr(kr_collector, "collect_backfill", lambda *a, **k: pytest.fail("unexpected collector"))
     monkeypatch.setattr(kr_collector, "collect_daily", lambda: pytest.fail("unexpected daily collector"))
     monkeypatch.setattr(kr_db, "_get_uploader", lambda uploader=None: uploader)
+    monkeypatch.setattr(krx_calendar, "session_status", lambda day: ("open", ""))   # 실행일이 휴장일이어도 날짜에 매이지 않게
     return kr_db
 
 

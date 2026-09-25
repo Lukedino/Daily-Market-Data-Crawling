@@ -131,7 +131,7 @@ def test_missing_today_still_requests_only_the_missing_codes(monkeypatch):
 # 워크플로우에 실패 알림을 붙여도 실패로 끝나지 않으면 알림이 뜰 수가 없다.
 
 import main as kr_main
-from data import kr_db
+from data import kr_db, krx_calendar
 
 
 class _Recorder:
@@ -161,6 +161,7 @@ def kr_env(monkeypatch, tmp_path):
 
     monkeypatch.setattr(kr_db, "local_path", lambda year: parquet)
     monkeypatch.setattr(kr_db, "get_last_date", lambda year=None: yesterday)
+    monkeypatch.setattr(krx_calendar, "session_status", lambda day: ("open", ""))   # 실행일이 휴장일이어도 날짜에 매이지 않게
     monkeypatch.setattr(kr_db, "load_year", lambda year, **kwargs: prior)
     monkeypatch.setattr(kr_db, "ensure_year_baselines", lambda years, **kwargs: {year: "ok" for year in years})
     monkeypatch.setattr(kr_db, "load_status", lambda: {"trading_days_total": 10})
