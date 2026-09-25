@@ -1303,6 +1303,141 @@ def _incremental_cursor(frame: pd.DataFrame, tickers: list[str], failed: list[st
     return cursor
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# 이벤트 종목 전체 재수집 (DM-04, 사용자 결정 2026-09-26)
+# ══════════════════════════════════════════════════════════════════════════════
+# 증분은 auto_adjust=True 라 배당·분할이 있으면 yfinance 가 과거 봉을 소급 재조정한다.
+# 그 종목의 새 행은 새 기준, 파일에 남은 과거 행은 옛 기준이라 이력 안에서 기준이
+# 갈라진다(하류 MA·ATR·수익률이 조용히 틀어진다). 저장 스키마는 그대로 두고, 그날
+# 액션이 관측된 종목만 전체 이력을 다시 받아 연도 파일에서 **그 종목 행만** 교체한다.
+#
+# 원칙
+#   · 목록은 먼저 게시한다 — action_tickers 는 수집 결과 attrs 에만 있고 parquet 에는
+#     남지 않아, 재수집이 중간에 죽으면 다음 실행은 그 종목을 알 수 없다. pending 파일의
+#     "{market}:rebase" 키에 둔다(SA 는 Drive 에 새 파일을 못 만든다 — 같은 파일을 쓴다).
+#   · 종목 단위로 전부 받은 뒤에 교체한다 — 한 연도라도 비거나 크게 줄어든 종목은 어느
+#     연도도 건드리지 않고 다음 날로 미룬다(옛 기준 이력이 "데이터 없음" 으로 바뀌면 안 된다).
+#   · 교체는 기존 행을 먼저 걷어내므로 save_year 의 시총 보존이 닿지 않는다 — 여기서 잇는다.
+#   · 커서(last_updated)는 건드리지 않는다. 증분 게시 뒤에 돈다.
+REBASE_START_YEAR = 2020
+REBASE_KEEP_RATIO = 0.9     # 새 이력 행 수가 기존의 이 비율에 못 미치면 그 종목은 미룬다
+
+
+def rebase_pending_key(market: str) -> str:
+    return f"{market}:rebase"
+
+
+def rebase_safe_targets(targets, frames_by_year: dict, existing_by_year: dict,
+                        failed) -> tuple[list[str], list[str]]:
+    """모든 연도를 받은 뒤 종목별로 교체해도 되는지 판정한다 — (교체, 보류)."""
+    failed_set = {str(t).strip().upper() for t in failed}
+
+    def count(df, ticker):
+        if df is None or df.empty or "Ticker" not in df:
+            return 0
+        return int((df["Ticker"].astype(str).str.strip().str.upper() == ticker).sum())
+
+    safe, deferred = [], []
+    for ticker in targets:
+        if ticker in failed_set:
+            deferred.append(ticker)
+            continue
+        ok = True
+        for year in existing_by_year:
+            before = count(existing_by_year.get(year), ticker)
+            after = count(frames_by_year.get(year), ticker)
+            if before and (after == 0 or after < before * REBASE_KEEP_RATIO):
+                ok = False
+                break
+        (safe if ok else deferred).append(ticker)
+    return safe, deferred
+
+
+def rebase_action_tickers(market: str, action_tickers, *, start_year: Optional[int] = None,
+                          upload: bool = True) -> dict:
+    """배당·분할이 관측된 종목의 전체 이력을 다시 받아 연도 파일에서 그 종목 행만 교체한다.
+
+    Returns {"targets", "replaced", "deferred"}. 하드 실패(레이트리밋 등)가 있으면
+    목록을 남긴 채 CollectionIncompleteError("rebase_incomplete") 로 끝나 알림이 울린다.
+    빈 응답·축소로 미룬 종목은 rebase_deferred 로만 남기고 다음 실행이 다시 시도한다.
+    """
+    from data import ohlc_db
+
+    key = rebase_pending_key(market)
+    if upload:
+        ohlc_db.download_pending()
+    pending = ohlc_db.load_pending()
+    targets = sorted({str(t).strip().upper() for t in list(pending.get(key, [])) + list(action_tickers or [])
+                      if str(t).strip()})
+    if not targets:
+        return {"targets": [], "replaced": [], "deferred": []}
+
+    pending[key] = targets
+    ohlc_db.publish_pending(pending, upload=upload)
+    logger.info("rebase_started")
+    logger.info(f"[Rebase] {market.upper()} 재수집 대상 {len(targets)}종목")
+
+    current_year = date.today().year
+    start_year = REBASE_START_YEAR if start_year is None else start_year
+    states = ohlc_db.ensure_year_baselines(market, range(start_year, current_year + 1), download=upload)
+    # 연도 파일이 없는 해(absent)에는 옛 기준 행도 없다 — 받지도, 새 파일을 만들지도 않는다
+    # (SA 는 Drive 에 새 파일을 못 만들어 업로드가 매일 실패하게 된다).
+    years = [year for year, state in sorted(states.items()) if state == "ok"]
+    symbol_overrides = build_symbol_overrides(targets)
+
+    frames_by_year, existing_by_year, hard_failed = {}, {}, set()
+    for year in years:
+        start_str = f"{year}-01-01"
+        end_str = (f"{year + 1}-01-01" if year < current_year
+                   else (date.today() + timedelta(days=1)).strftime("%Y-%m-%d"))
+        try:
+            df, failed = fetch_ohlc_range(targets, start_str, end_str, symbol_overrides=symbol_overrides)
+        except Exception as e:
+            raise ohlc_db.DriveSyncError(f"{market} {year}년 재수집 실패: {type(e).__name__}") from None
+        hard_failed.update(str(t).strip().upper() for t in failed)
+        frames_by_year[year] = df
+        existing_by_year[year] = ohlc_db.load_year(market, year, strict=True)
+
+    safe, deferred = rebase_safe_targets(targets, frames_by_year, existing_by_year, hard_failed)
+    for year in years:
+        df = frames_by_year[year]
+        existing = existing_by_year[year]
+        if df.empty or not safe:
+            continue
+        mask = df["Ticker"].astype(str).str.strip().str.upper().isin(safe)
+        subset = df[mask].reset_index(drop=True)
+        if subset.empty:
+            continue
+        attrs = dict(df.attrs)
+        subset["Date"] = pd.to_datetime(subset["Date"]).dt.date     # save_year 와 같은 키 표현
+        if not existing.empty:
+            kept = existing[existing["Ticker"].astype(str).str.strip().str.upper().isin(safe)].copy()
+            kept["Date"] = pd.to_datetime(kept["Date"]).dt.date
+            subset = ohlc_db._preserve_missing_marketcap(kept, subset)
+        subset.attrs = attrs
+        ohlc_db.validate_price_basis(subset, market, replace_tickers=safe)
+        ohlc_db.save_year(subset, market, year, replace_tickers=safe)
+        if upload:
+            failed_files = ohlc_db.upload_years(market, [year])
+            if failed_files:
+                raise ohlc_db.DriveSyncError(f"업로드 실패 {failed_files} — 재수집 목록 유지")
+
+    pending = ohlc_db.load_pending()
+    if deferred:
+        pending[key] = sorted(deferred)
+    else:
+        pending.pop(key, None)
+    ohlc_db.publish_pending(pending, upload=upload)
+    if deferred:
+        logger.warning("rebase_deferred")
+        logger.warning(f"[Rebase] {market.upper()} 보류 {len(deferred)}종목 (빈 응답·축소·실패) — 다음 실행에 재시도")
+    if hard_failed:
+        raise CollectionIncompleteError("rebase_incomplete", hard_failed)
+    logger.info("rebase_completed")
+    logger.info(f"[Rebase] {market.upper()} 교체 {len(safe)}종목 / 보류 {len(deferred)}종목")
+    return {"targets": targets, "replaced": safe, "deferred": sorted(deferred)}
+
+
 def update_market(
     market: str,
     tickers: Optional[list[str]] = None,
@@ -1390,6 +1525,10 @@ def update_market(
         if new_df.empty:
             raise CollectionIncompleteError("empty_unverified", tickers)
     ohlc_db.validate_price_basis(new_df, market)
+    # 배당·분할이 관측된 종목 — 게시가 끝난 뒤 rebase_action_tickers 가 전체 이력을
+    # 다시 받아 교체한다(DM-04). attrs 는 아래 보강·저장에서 사라지므로 여기서 잡는다.
+    action_tickers = sorted(str(t).strip().upper() for t in
+                            (new_df.attrs.get("ohlc_request") or {}).get("action_tickers") or ())
 
     # 6-b. MarketCap 보강
     if market == "crypto":
@@ -1419,6 +1558,7 @@ def update_market(
         ohlc_db.publish_status(market, actual_last, len(tickers), actual_oldest, upload=upload)
 
     logger.info(f"[OhlcCollector] {market.upper()} 수신 후보 게시 완료 (공통 관측 커서: {actual_last})")
+    return action_tickers
 
 
 # ══════════════════════════════════════════════════════════════════════════════

@@ -62,7 +62,8 @@ _EVENTS = {"operation_failed", "writer_busy", "external_output_suppressed",
            "market_failed", "cursor_held_for_sparse_session",
            "sparse_session_abandoned", "sparse_session_excluded",
            "price_basis_mismatch_tolerated",
-           "kr_market_closed", "kr_calendar_unavailable", "kr_source_fallback_attempted"}
+           "kr_market_closed", "kr_calendar_unavailable", "kr_source_fallback_attempted",
+           "rebase_started", "rebase_completed", "rebase_deferred"}
 # Every snake_case code raised anywhere in data/, scripts/ and main.py. A code that is
 # missing here is silently dropped from the artifact, so a failure shows as a bare
 # operation_failed with no cause — that is how the 2026-09-22 OHLC outage stayed opaque
@@ -96,7 +97,7 @@ _ERROR_CODES = {
     "ohlc_baseline_name_invalid", "ohlc_market_invalid", "ohlc_remote_unconfigured",
     "ohlc_uploader_unavailable", "pending_baseline_failed", "pending_baseline_invalid",
     "pending_baseline_unavailable", "price_basis_mismatch", "price_basis_unverified",
-    "price_values_unverified", "resave_files_absent", "resave_publication_failed",
+    "price_values_unverified", "rebase_incomplete", "resave_files_absent", "resave_publication_failed",
     "resave_requested_file_absent", "sector_baseline_invalid", "sector_collection_empty",
     "sector_download_failed", "sector_download_unavailable", "sector_field_invalid",
     "sector_info_unverified", "sector_keys_invalid", "sector_observation_invalid",

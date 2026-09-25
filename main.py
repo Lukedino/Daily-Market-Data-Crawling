@@ -268,10 +268,15 @@ def run_ohlc_update(args):
                 )
                 if new_tickers:
                     logger.info(f"[OhlcUpdate] {market.upper()} 신규 종목 백필 완료: {new_tickers}")
-                ohlc_collector.update_market(
+                action_tickers = ohlc_collector.update_market(
                     market=market,
                     upload=args.upload_drive,
                 )
+                # 증분이 게시된 뒤에만 — 배당·분할 종목의 전체 이력 교체(DM-04). 이미 최신이라
+                # 수집이 없었으면(None) 그날은 재수집 대상도 새로 생기지 않는다.
+                if action_tickers is not None:
+                    ohlc_collector.rebase_action_tickers(
+                        market, action_tickers, upload=args.upload_drive)
             except Exception as error:
                 # raise failures[0] 는 첫 시장의 예외만 올린다 — 두 번째 시장의
                 # 원인이 artifact 에서 통째로 사라지므로 시장마다 한 줄 남긴다.
