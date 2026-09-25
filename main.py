@@ -451,13 +451,28 @@ def run_kr_daily(args, today=None):
 
     # 3. 오늘 FDR 스냅샷 수집
     logger.info("[KrDaily] 오늘 스냅샷 수집 (FDR StockListing)")
-    df = kr_collector.collect_daily()
+    source_error = None
+    try:
+        df = kr_collector.collect_daily()
+    except kr_collector.KrCollectionError as error:
+        # FDR StockListing은 KRX가 아니라 제3자 GitHub 캐시 저장소의 날짜별 CSV를
+        # 읽는다. 그쪽이 그날치를 안 올리면 세 시장 전부 404이고(2026-09-08),
+        # collect_daily 는 빈 프레임이 아니라 typed 오류(kr_source_failed 등)를 던진다.
+        # 2026-09-25 결정 B(검증된 폴백)가 겨냥한 상황이 바로 이것인데, 아래 폴백이
+        # 빈 프레임 분기에만 걸려 있어 실제 장애에서는 한 번도 실행되지 않았다
+        # (2026-09-26 확인). 원천 오류 코드는 공개 로그에 남기고 폴백을 시도한다 —
+        # 폴백은 저장본과 종목별로 대조된 행만 받고, 비면 같은 typed 오류로 끝난다.
+        source_error = error
+        code = error.args[0] if len(error.args) == 1 else None
+        logger.warning("kr_source_fallback_attempted",
+                       extra={"failure_code": code if isinstance(code, str) else None})
+        logger.warning(f"[KrDaily] FDR 스냅샷 실패({code}) → yfinance 검증 폴백 시도")
+        df = pd.DataFrame()
 
     used_fallback = False
     if df.empty:
-        # FDR StockListing은 KRX가 아니라 제3자 GitHub 캐시 저장소의 날짜별
-        # CSV를 읽는다. 그쪽이 그날치를 안 올리면 세 시장 전부 404다(2026-09-08).
-        # 빈 결과 호환경로의 후보만 받는다. 아래 가격 기준 검증 전에는 저장하지 않는다.
+        # 빈 결과 호환경로와 typed 실패 둘 다 여기로 온다. 아래 가격 기준 검증 전에는
+        # 저장하지 않는다.
         logger.warning("[KrDaily] FDR 스냅샷 0건 → yfinance 전량 폴백 시도")
         if fallback_meta:
             df = kr_collector.collect_daily_fallback(fallback_meta, today, reference=reference)
@@ -466,6 +481,8 @@ def run_kr_daily(args, today=None):
             logger.error("[KrDaily] 폴백 유니버스도 비어 있음 (기존 parquet 없음)")
 
     if df.empty:
+        if source_error is not None:
+            raise source_error            # 원천 실패 코드 그대로 — 실패 알림이 원인을 싣는다
         logger.error("[KrDaily] 오늘 수집 실패 (FDR·yfinance 모두 0건) → 실패로 종료")
         sys.exit(1)
 

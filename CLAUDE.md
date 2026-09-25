@@ -150,10 +150,10 @@ Market | MarketId | Rank | Date
 1. Drive에서 현재 연도 parquet 다운로드
 2. `last_date` 확인 → 어제까지 누락된 영업일 계산
 3. 누락 구간이 있으면 yfinance backfill 자동 실행
-4. FDR StockListing으로 오늘 스냅샷 수집 (0건이면 yfinance 전량 폴백)
+4. FDR StockListing으로 오늘 스냅샷 수집 — 0건이거나 **원천 typed 실패**(404·빈 응답·날짜 불일치, 2026-09-26)면 저장본과 종목별 대조를 통과한 행만 받는 **검증된 yfinance 전량 폴백**
 5. Drive에 업로드
 
-> 4번이 폴백까지 0건이면 `sys.exit(1)`로 끝난다 — 조용히 넘어가면 하류가 하루 늦은
+> 4번이 폴백까지 0건이면 `sys.exit(1)`(원천 typed 실패였으면 같은 오류 코드로 raise)로 끝난다 — 조용히 넘어가면 하류가 하루 늦은
 > 데이터로 돌기 때문이다. 실패 시 `kr-daily.yml`이 텔레그램으로 알린다.
 
 ---
@@ -207,13 +207,13 @@ python scripts/verify_kr.py --drive --fix
   → `upload_years()` 가 실패한 파일 이름 목록을 반환. 실패가 있으면 상태를 갱신하지 않고 `DriveSyncError`/`sys.exit(1)` → 기존 실패 알림이 울린다.
 - 공개 저장소라 업로드·다운로드 실패 로그에는 예외 문자열(Drive ID 가 실릴 수 있음) 대신 예외 종류만 남긴다.
 - 테스트 176 → 186 (`tests/test_incremental_drive_sync.py`).
-- **남은 것**(같은 검토): 백필 경로의 `upload_years` 반환값 미확인(`ohlc_collector.py` 2곳), 크립토 7일 재조회가 기존 `MarketCap` 을 NaN 으로 덮음(D-05),
-  배치 실패가 연속성 게이트(10%) 아래로 통과(D-04), 증분 `auto_adjust=True` + `Splits`·`Dividends` 하드코딩(D-03, 설계), `load_*_year` 가 읽기 예외를 삼켜 병합 가드가 죽은 코드(D-06),
-  `collection.log` 아티팩트에 DART 키 쿼리스트링·Drive ID 가 실릴 수 있음(D-07), `sector-meta.yml` 의 boolean 비교로 dry-run 이 실제 업로드(D-09).
+- **남은 것**(같은 검토 — 2026-09-26 현재 코드 기준 재판정, 09-21 코덱스 번호 DM-xx 로 통일): 09-22 `b90caae`·`6121222` 와 09-24 관문 수정으로 **해결** — 백필 `upload_years` 실패 전파(DM-03), 크립토 재조회의 `MarketCap` 보존(DM-06 `_preserve_missing_marketcap`), 손상 파일 strict 읽기·원자 교체(DM-07), 공개 로그 `PublicFormatter`(DM-08), 워크플로 공통 `concurrency`·dry-run 조기 반환(DM-09), 문서·테스트 경로 오탐(DM-13).
+  **부분** — DM-04 US/Crypto `auto_adjust=True` 증분 연결: 전체 기준 변경(5% 초과)은 막지만 배당·분할 종목은 옛 기준 이력 뒤에 새 조정가 행이 붙는다(과거 재수집 없음, **데이터 계약 결정 필요**) · DM-05 종목별 실패 기록 없음(US 재조회 창이 직전 1세션이라 같은 종목 2회 연속 실패면 영구 구멍) · DM-10 성공 응답에 sector/industry 가 빈 경우 기존 값을 `""` 로 덮음 · DM-11 마지막 저장일이 폴백일(Marcap NaN)이면 월간 재무가 `universe_unverified` 실패 · DM-12 하류(KIS·Mr.Market·ML)의 nullable Int64 소비 미확인.
   참고: "`financials-update` 가 ratios 이력을 매 실행 지운다" 는 2026-09-01 `15bfd12` 에서 **이미 수정**됐다.
 
 | 날짜 | 변경 내용 |
 |------|---------|
+| 2026-09-26 | **[FIX-KR-TYPED-FALLBACK]** 09-25 결정 B(검증된 yfinance 폴백)가 **실제 장애에서는 실행된 적이 없었다.** `collect_daily()` 는 FDR 404·빈 응답·날짜 불일치에 빈 프레임이 아니라 typed `KrCollectionError`(`kr_source_failed` 등)를 던지는데, `run_kr_daily` 가 이를 잡지 않아 `if df.empty:` 폴백 분기는 도달 불가였다(코덱스 09-22 테스트가 "typed 실패는 야후를 부르지 않는다" 로 옛 정책을 고정해 둔 잔재, 테스트는 `collect_daily` 를 빈 DF 로 바꿔 끼워 가렸다). → typed 실패를 잡아 `kr_source_fallback_attempted`(+`failure_code`) 를 공개 로그에 남기고 검증된 폴백을 시도, 폴백도 비면 **같은 typed 오류**로 종료(실패 알림이 원인 코드를 싣는다), 검증 안 된 후보는 종전대로 `price_basis_unverified` 보류. 테스트 3건 교체·추가(옛 동작 변이 검출 2건), 616 passed. 공개 저장소·push 후 다음 예약 실행부터 |
 | 2026-09-25 | **[FIX-KR-HOLIDAY-GAP]** kr-daily 가 추석(09-25)에 `price_basis_unverified` 로 실패. 저장본 마지막 날짜 09-23, 어제 09-24(평일)를 `pd.bdate_range` 가 갭으로 판정 → yfinance 갭 백필 → **야후는 휴장 구간을 물으면 직전 거래일(09-23) 봉을 돌려줘** 결과가 비어 있지 않음 → `validate_price_basis` 가 yfinance 출처를 거부 → exit 1(실패 알림). 09-24 는 갭이 없어 FDR 경로로 성공. → `data/krx_calendar.py`(KIS-Trading 과 같은 `holidays.financial_holidays("XKRX")`, `holidays==0.105` 핀) 신설: ① 실행일이 KRX 휴장이면 `kr_market_closed` 로그 후 exit 0(수집·백필 없음) ② 갭 판정을 평일이 아니라 **거래일** 기준으로. 달력 조회 실패 시 `kr_calendar_unavailable` 경고 후 예전 평일 기준. `run_kr_daily(args, today=None)` 주입 인자 추가. 다음 함정은 10-06(개천절 대체휴일 10-05 다음 날). 테스트 +12(`tests/test_kr_daily_holiday.py`), 기존 kr-daily 픽스처 3곳은 달력을 "개장"으로 고정해 실행 날짜에 매이지 않게. **같은 날 B안(검증된 폴백) 구현 — [FIX-KR-VERIFIED-FALLBACK]:** yfinance 갭 백필·전량 폴백·누락 보완 세 경로가 `validate_price_basis` 의 무조건 거부로 거래일에도 항상 exit 1 이던 것(09-08 자가 치유 사망)을, **원시가(`auto_adjust=False`)로 받아 직전 공통 세션 종가를 FDR 저장본(`reference`)과 종목별 대조** → 1호가(`krx_tick_size`, 2023 개편 단위) 안에서 전부 일치한 종목만 `verified=True` 로 채택(`verify_against_reference`), 불일치·대조 불가 종목은 보류. 조회 창을 앞으로 10일 넓혀(`_VERIFY_LOOKBACK_DAYS`) 대조용 세션을 함께 받고 결과에서는 뗀다. `run_kr_daily` 가 저장본을 `reference=` 로 세 경로에 넘기고 `run_kr_backfill` 은 구간 연도 저장본을 합쳐 넘긴다. 검증된 프레임은 FDR 원천 일자 증명 대신 날짜 유효성만 본다(여러 날짜 가능). **실데이터 전제 확인:** 09-23 야후 원시 종가 8종목(삼성전자·하이닉스·에코프로비엠 등) = FDR 종가 **전부 diff 0.** 테스트 +15(`tests/test_kr_verified_fallback.py`), 613 passed. 시총·순위는 여전히 NaN(폴백 한계 그대로) |
 | 2026-09-14 | **[PERF-KR-FIN-CALENDAR-GATE]** financials-update 가 KR 재무 신설(09-03) 뒤 105~120분이 됐는데, **첫 수집 비용이 아니라 매달 반복되는 헛호출**이었다. 09-04(두 번째) 실행 로그 실측: US 33분 · Crypto 1분 · **KR 70분**(1,000종목 × 4.2초). 수집 대상은 작년+올해 2년뿐이고 증분 스킵도 있지만, 당해 연도의 **아직 공시되지 않은 분기**(9월엔 3Q·4Q)를 매번 목표로 삼아 차분에 필요한 반기·3Q·사업보고서 **3회를 종목마다 빈 응답으로 받고** 있었다 — 11월 3Q 공시 뒤엔 2회, 3월 사업보고서 뒤엔 다음 연도 4개가 전부 미공시라 4회(≈93분), 즉 영구 반복. → `target_quarters(year, today)`: 정기보고서 **법정 제출기한**(1Q 5/15·반기 8/14·3Q 11/14·사업보고서 익년 3/31, `_REPORT_DEADLINES`)이 차분 의존 보고서 전부에서 지난 분기만 목표. 기한 당일은 제외(다음 날부터). 효과(매월 1일 실행): 6·9·12·4월에만 새 분기 1개 수집(25~47분), 나머지 8개월은 **DART 호출 0건**(늦게 공시한 회사만 재시도). 실행 로그에 `{연도}년 목표 분기 [...]` 한 줄이 찍힌다. `collect_kr_financials(today=)` 주입 인자 추가(테스트 결정성). `timeout-minutes` 180 은 그대로 둔다. 테스트 +9(`TestCalendarGate` 5 + 통합 3 + 기존 4건에 today 고정). Personal Assistant GHA 감시의 DURATION_SPIKE 도 같은 날 "연속 두 번이면 새 기준" 규칙으로 보정됨 |
 | 2026-09-13 | **[FIX-CRON-OFFPEAK]** `ohlc-daily.yml` 크론을 정각·30분에서 **`23 22 * * 1-6`·`41 0 * * *`** 로 이동. GitHub Actions 는 매시 정각 부근 부하로 예약 실행을 미루는데, 실측 22:00 크론은 23:29~23:54 에(1.5~2시간), 00:30 크론은 04:47~05:35 에(4.3~5시간) 시작해 "크립토 마감 30분 뒤 반영" 이라는 00:30 크론의 목적이 무너져 있었다(Personal Assistant GHA 감시의 OHLC 23시대 실패 조사 중 발견 — 실패 자체는 09-08 `b8d76f9` 로 이미 해결). ⚠️ 대상 시장 판별이 `github.event.schedule` **문자열 비교**라 크론을 바꾸면 두 비교(`if [ "$SCHEDULE" = "41 0 * * *" ]`, 실행 스텝·알림 스텝)도 같이 바꿔야 한다 — 놓치면 크립토 크론이 `market=all` 로 돌아 US 를 하루 두 번 저장한다. 효과 확인은 다음 예약 실행의 시작 시각(22:23·00:41 근처면 성공) → **측정 결과(09-14~15) 효과 없음**: 00:41 크론 → 05:23·05:15 시작(4.5시간 지연 그대로), 22:23 크론 → 다음날 00:42 시작(2.3시간). 지연의 원인은 분 단위 혼잡이 아니라 GitHub 예약 큐 자체(이 계정의 KIS-Trading·Trading-AI-Pipeline 도 동일). 정시성이 필요하면 크론 대신 외부 트리거(Cloud Scheduler → `workflow_dispatch` API)로 바꿔야 한다 — Personal Assistant 저장소에서 검토 |

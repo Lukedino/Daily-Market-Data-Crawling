@@ -130,6 +130,8 @@ def test_missing_today_still_requests_only_the_missing_codes(monkeypatch):
 # 2026-09-08 실행은 수집 0건인데도 GHA가 success로 끝났다(run_kr_daily가 return).
 # 워크플로우에 실패 알림을 붙여도 실패로 끝나지 않으면 알림이 뜰 수가 없다.
 
+import logging
+
 import main as kr_main
 from data import kr_db, krx_calendar
 
@@ -141,6 +143,7 @@ class _Recorder:
         self.status = None
         self.path = None
         self.before = None
+        self.append_kwargs = None
 
 
 @pytest.fixture
@@ -172,6 +175,7 @@ def kr_env(monkeypatch, tmp_path):
 
     def _append(df, **kwargs):
         rec.appended = df
+        rec.append_kwargs = kwargs
         return [2026]
 
     monkeypatch.setattr(kr_db, "append_rows", _append)
@@ -262,14 +266,48 @@ def test_normal_fdr_path_does_not_call_fallback(kr_env, monkeypatch):
     assert kr_env.appended is not None
 
 
-def test_actual_fdr_typed_failure_stops_before_yahoo_fallback(kr_env, monkeypatch):
-    """실제 collect_daily의 원천 실패는 빈 DF가 아니라 typed raise이다."""
+# 실제 collect_daily 의 원천 실패(404 등)는 빈 DF 가 아니라 typed raise 다. 2026-09-25 의
+# 결정 B(검증된 폴백)는 바로 이 실패를 메우려는 것인데, 폴백이 빈 DF 분기에만 걸려 있어
+# 실제 장애에서는 실행된 적이 없었다(2026-09-26 확인). typed 실패 → 검증된 폴백 → 폴백도
+# 비면 같은 typed 오류로 끝나 실패 알림이 원인 코드를 싣는다.
+def _typed_source_failure(monkeypatch, code="kr_source_failed"):
     def source_failed():
-        raise kr_collector.KrCollectionError("kr_source_failed")
+        raise kr_collector.KrCollectionError(code)
     monkeypatch.setattr(kr_collector, "read_krx_snapshot", source_failed)
+
+
+def test_typed_fdr_failure_reaches_the_verified_yahoo_fallback(kr_env, monkeypatch, caplog):
+    _typed_source_failure(monkeypatch)
+    seen = {}
+
+    def fallback(code_meta, target_date=None, reference=None):
+        seen["meta"] = code_meta
+        frame = _today_row()
+        frame.attrs["kr_price_basis"]["verified"] = True
+        return frame
+    monkeypatch.setattr(kr_collector, "collect_daily_fallback", fallback)
+    with caplog.at_level(logging.WARNING):
+        kr_main.run_kr_daily(_ARGS)
+    assert sorted(seen["meta"]) == ["005930", "247540"], "폴백 유니버스는 저장본에서 온다"
+    assert kr_env.appended is not None and kr_env.append_kwargs == {"ohlc_only": True}
+    fallback_events = [r for r in caplog.records if r.msg == "kr_source_fallback_attempted"]
+    assert fallback_events and fallback_events[0].failure_code == "kr_source_failed"
+
+
+def test_typed_fdr_failure_with_empty_fallback_raises_the_source_code(kr_env, monkeypatch):
+    _typed_source_failure(monkeypatch, "source_date_unverified")
     monkeypatch.setattr(kr_collector, "collect_daily_fallback",
-                        lambda *a, **kw: pytest.fail("typed FDR failure must not call Yahoo"))
-    with pytest.raises(kr_collector.KrCollectionError, match="kr_source_failed"):
+                        lambda code_meta, target_date=None, reference=None: pd.DataFrame())
+    with pytest.raises(kr_collector.KrCollectionError, match="source_date_unverified"):
+        kr_main.run_kr_daily(_ARGS)
+    _assert_hold(kr_env)
+
+
+def test_typed_fdr_failure_with_unverified_fallback_still_holds(kr_env, monkeypatch):
+    _typed_source_failure(monkeypatch)
+    monkeypatch.setattr(kr_collector, "collect_daily_fallback",
+                        lambda code_meta, target_date=None, reference=None: _today_row())
+    with pytest.raises(kr_collector.KrCollectionError, match="price_basis_unverified"):
         kr_main.run_kr_daily(_ARGS)
     _assert_hold(kr_env)
 
@@ -287,7 +325,6 @@ def test_yahoo_supplement_holds_before_append(kr_env, monkeypatch):
 # 종목 목록(_build_universe)이 FDR에 의존하지 않아야 한다. 2026-09-08에는
 # 그것마저 같은 404라서 다음날도 못 메울 상태였다.
 
-import logging
 
 
 def test_backfill_survives_dead_fdr_when_given_db_universe(monkeypatch, caplog):
