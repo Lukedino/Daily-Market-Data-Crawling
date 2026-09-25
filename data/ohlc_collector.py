@@ -1684,6 +1684,13 @@ def _enrich_crypto_marketcap(df: pd.DataFrame) -> pd.DataFrame:
 # 종목 메타데이터 수집 (주 1회 — Sector / Industry / Market 태그)
 # ══════════════════════════════════════════════════════════════════════════════
 
+# 섹터가 없는 것이 정상인 종류 — 야후 quoteType 기준. 이 밖(주식이거나 종류를 모름)에서
+# Sector/Industry 가 비면 "관측 못 함" 이다: .info 가 일부 필드만 주는 응답이 있어(DM-10)
+# 그대로 저장하면 기존 값을 "" 로 덮고 updated_at 까지 새로 찍힌다.
+_SECTORLESS_QUOTE_TYPES = {"ETF", "MUTUALFUND", "INDEX", "CRYPTOCURRENCY", "CURRENCY",
+                           "FUTURE", "OPTION"}
+
+
 def collect_sector_meta(market: str) -> pd.DataFrame:
     """
     US/Crypto 종목 메타데이터 수집 (주 1회 실행 권장).
@@ -1752,11 +1759,17 @@ def collect_sector_meta(market: str) -> pd.DataFrame:
                 raise ValueError("sector_info_unverified")
             failed = []
             fields = {}
+            quote_type = info.get("quoteType")
+            sectorless_ok = isinstance(quote_type, str) and quote_type.upper() in _SECTORLESS_QUOTE_TYPES
             for source, target in [("sector", "Sector"), ("industry", "Industry")]:
                 value = info.get(source, "")
                 if value is None:
                     value = ""
                 if not isinstance(value, str):
+                    failed.append(target)
+                    value = ""
+                elif not value.strip() and not sectorless_ok:
+                    # 주식(또는 종류 미상)의 빈 섹터는 관측이 아니다 — 기존 값을 지킨다.
                     failed.append(target)
                     value = ""
                 fields[source] = value

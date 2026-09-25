@@ -143,6 +143,37 @@ def test_actual_info_failure_preserves_existing(monkeypatch, value):
     assert observed["updated_at"] == "2026-09-01T00:00:00"
 
 
+# DM-10 (2026-09-26): 종목 신원은 있는데 sector/industry 만 빠진 '정상' 응답이 있다.
+# 주식이라면 빈 값은 관측이 아니라 결측이다 — 기존 값을 "" 로 덮고 시각까지 새로 찍히면
+# 안 된다. ETF·펀드·지수는 섹터가 없는 것이 정상 관측이라 그대로 허용한다.
+@pytest.mark.parametrize("info", [
+    {"symbol": "AAPL", "quoteType": "EQUITY"},                                   # 두 키 모두 없음
+    {"symbol": "AAPL", "quoteType": "EQUITY", "sector": "", "industry": ""},      # 빈 문자열
+    {"symbol": "AAPL", "quoteType": "EQUITY", "sector": None, "industry": None},  # None
+    {"symbol": "AAPL"},                                                          # 종류 미상도 보수적으로
+])
+def test_equity_with_empty_sector_fields_is_a_failed_observation(monkeypatch, info):
+    prior()
+    setup_info(monkeypatch, {"AAPL": info})
+    fresh = collector.collect_sector_meta("us")
+    assert fresh.attrs["sector_failed_fields"] == {"AAPL": ["Sector", "Industry"]}
+    db.save_sector_meta(fresh, "us")
+    observed = db.load_sector_meta("us").iloc[0]
+    assert observed["Sector"] == "Technology" and observed["Industry"] == "Software"
+    assert observed["updated_at"] == "2026-09-01T00:00:00"
+
+
+def test_equity_with_only_industry_missing_keeps_the_old_industry_and_takes_the_new_sector(monkeypatch):
+    prior()
+    setup_info(monkeypatch, {"AAPL": {"symbol": "AAPL", "quoteType": "EQUITY",
+                                      "sector": "Healthcare", "industry": ""}})
+    fresh = collector.collect_sector_meta("us")
+    assert fresh.attrs["sector_failed_fields"] == {"AAPL": ["Industry"]}
+    db.save_sector_meta(fresh, "us")
+    observed = db.load_sector_meta("us").iloc[0]
+    assert observed["Sector"] == "Healthcare" and observed["Industry"] == "Software"
+
+
 def test_valid_etf_without_sector_and_crypto_empty_fields_are_allowed(monkeypatch):
     setup_info(monkeypatch, {"SPY": {"quoteType": "ETF"}}, tickers=("SPY",))
     fresh = collector.collect_sector_meta("us")
