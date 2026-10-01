@@ -1224,6 +1224,10 @@ SPARSE_SESSION_MIN_PCT = 50.0
 없고 메가캡에만 있었다(503종목 표본 12.1%). 그런 날짜는 세션이 아니라 결손이다."""
 
 MAX_CURSOR_HOLD_DAYS = 7
+
+STALE_TICKER_DAYS = 3
+"""같은 달력군 최신 날짜보다 이만큼(달력일) 넘게 뒤처진 종목은 공급이 멈춘 것으로 보고
+커서 계산에서 뺀다. 미국 연휴(최대 4일 연속 휴장)는 군 전체가 같이 쉬므로 걸리지 않는다."""
 """결손 날짜 앞에서 커서를 잡아 두는 최대 기간. 다음 실행이 다시 받게 하되,
 공급자가 끝내 복구하지 않으면 수집 창이 무한히 커지므로 탈출구를 둔다.
 이 기간이 지나면 그 날짜를 포기하고 전진한다(잃지만 수집은 계속된다)."""
@@ -1299,6 +1303,22 @@ def _incremental_cursor(frame: pd.DataFrame, tickers: list[str], failed: list[st
         if not by_ticker:
             raise CollectionIncompleteError("session_unverified", sorted(holed))
         logger.warning("session_unverified_tolerated")
+    # 공급이 멈춘 종목(야후가 며칠째 새 봉을 안 주는 종목)은 커서를 정하지 못한다.
+    # 그대로 두면 그 종목의 마지막 날짜에 커서가 영영 묶이고 재조회 창이 매일 넓어진다
+    # (2026-10-01 실측: XCN-USD 가 09-27 에 멈춰 크립토 커서가 나흘째 09-27). 같은 달력군의
+    # 최신 날짜보다 STALE_TICKER_DAYS 넘게 뒤처진 종목만 커서 계산에서 뺀다 — 그 종목 행은
+    # 그대로 게시되고, 군 전체가 늦은 날은 군 최신 날짜 기준이라 영향이 없다.
+    stale = set()
+    for cohort in groups.values():
+        present = [t for t in cohort if t in by_ticker]
+        if not present:
+            continue
+        newest = max(max(by_ticker[t]) for t in present)
+        stale |= {t for t in present if (newest - max(by_ticker[t])).days > STALE_TICKER_DAYS}
+    if stale and len(stale) < len(by_ticker):
+        for ticker in stale:
+            by_ticker.pop(ticker, None)
+        logger.warning("stale_ticker_excluded")
     # 일부 종목만 최근 날짜까지 왔다고 공통 max 커서를 앞당기지 않는다.
     cursor = max(last_date, min(max(days) for days in by_ticker.values()))
     # 공급자가 대부분 종목에 주지 않은 날짜를 커서가 지나가면 그 날짜는 다시

@@ -63,7 +63,8 @@ _EVENTS = {"operation_failed", "writer_busy", "external_output_suppressed",
            "sparse_session_abandoned", "sparse_session_excluded",
            "price_basis_mismatch_tolerated",
            "kr_market_closed", "kr_calendar_unavailable", "kr_source_fallback_attempted",
-           "rebase_started", "rebase_completed", "rebase_deferred"}
+           "rebase_started", "rebase_completed", "rebase_deferred",
+           "stale_ticker_excluded"}
 # Every snake_case code raised anywhere in data/, scripts/ and main.py. A code that is
 # missing here is silently dropped from the artifact, so a failure shows as a bare
 # operation_failed with no cause — that is how the 2026-09-22 OHLC outage stayed opaque

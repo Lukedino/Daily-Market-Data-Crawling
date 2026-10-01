@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
+import logging
 import pytest
 
 import main as entry
@@ -430,3 +431,30 @@ def test_sparse_session_detection_counts_tickers_not_rows():
     assert oc.sparse_session_dates(_coverage_frame(by)) == [days[1]]   # 2/10 = 20% < 50%
     full = {f"T{i:02}": days for i in range(10)}
     assert oc.sparse_session_dates(_coverage_frame(full)) == []
+
+
+
+# ── 공급이 멈춘 종목이 커서를 묶지 않는다 (2026-10-01: XCN-USD 로 크립토 커서 나흘 정체) ──
+def test_a_ticker_the_provider_stopped_does_not_pin_the_cursor(caplog):
+    days = [date(2026, 9, 21) + timedelta(days=n) for n in range(11)]      # 09-21 ~ 10-01
+    by = {f"C{i:03}-USD": days for i in range(20)}
+    by["XCN-USD"] = [d for d in days if d <= date(2026, 9, 27)]             # 4일 뒤처짐(실측)
+    with caplog.at_level(logging.WARNING):
+        cursor = oc._incremental_cursor(_coverage_frame(by), list(by), [], date(2026, 9, 27), "crypto")
+    assert cursor == days[-1]
+    assert any(r.msg == "stale_ticker_excluded" for r in caplog.records)
+
+
+def test_a_ticker_one_day_behind_still_holds_the_cursor():
+    """하루 늦은 종목은 공급 중단이 아니라 늦게 나온 봉일 수 있다 — 종전처럼 기다린다."""
+    days = [date(2026, 9, 21) + timedelta(days=n) for n in range(10)]
+    by = {f"C{i:03}-USD": days for i in range(20)}
+    by["LATE-USD"] = days[:-1]
+    assert oc._incremental_cursor(_coverage_frame(by), list(by), [], date(2026, 9, 21), "crypto") == days[-2]
+
+
+def test_three_days_behind_is_still_within_the_wait():
+    days = [date(2026, 9, 21) + timedelta(days=n) for n in range(10)]      # 09-21 ~ 09-30
+    by = {f"C{i:03}-USD": days for i in range(20)}
+    by["SLOW-USD"] = [d for d in days if d <= date(2026, 9, 27)]
+    assert oc._incremental_cursor(_coverage_frame(by), list(by), [], date(2026, 9, 21), "crypto") == date(2026, 9, 27)
