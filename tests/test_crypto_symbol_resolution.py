@@ -187,3 +187,51 @@ def test_build_overrides_promotes_discovered_symbols(monkeypatch):
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
+
+
+# ── 5배 기준에 안 걸린 겹친 심볼 (2026-10-01 XCN-USD) ─────────────────────────────
+from datetime import date as _date
+import pandas as _pd
+from data import ohlc_collector as _oc
+
+_LIST = {"XCN": (18679, 0.00466), "SOL": (5426, 150.0), "PEPE": (24478, 0.00001)}
+
+
+def _probe(rows):
+    return lambda symbols: _pd.DataFrame(
+        [{"Ticker": s, "Date": _date(2026, 10, 1), "Close": rows[s]} for s in symbols if s in rows])
+
+
+def test_stalled_plain_symbol_is_replaced_when_the_cmc_id_symbol_matches():
+    latest = {"XCN-USD": 0.00104, "SOL-USD": 151.0}
+    seen = {"XCN-USD": _date(2026, 9, 26), "SOL-USD": _date(2026, 10, 1)}
+    out = _oc.confirm_suspect_overrides(["XCN-USD", "SOL-USD"], latest, seen, {}, "s", "e",
+                                        listing=_LIST, fetch=_probe({"XCN18679-USD": 0.004665}))
+    assert out == {"XCN-USD": "XCN18679-USD"}
+
+
+def test_a_suspect_is_kept_when_the_cmc_id_symbol_is_no_closer():
+    latest = {"PEPE-USD": 0.000025}                      # 2.5배 — 의심만
+    seen = {"PEPE-USD": _date(2026, 10, 1)}
+    out = _oc.confirm_suspect_overrides(["PEPE-USD"], latest, seen, {}, "s", "e",
+                                        listing=_LIST, fetch=_probe({"PEPE24478-USD": 0.000025}))
+    assert out == {}
+
+
+def test_no_probe_for_tickers_that_agree_with_cmc_or_were_already_decided():
+    def boom(symbols):
+        raise AssertionError("의심 종목이 없으면 조회하지 않는다")
+    latest = {"SOL-USD": 149.0, "XCN-USD": 0.00104}
+    seen = {"SOL-USD": _date(2026, 10, 1), "XCN-USD": _date(2026, 10, 1)}
+    assert _oc.confirm_suspect_overrides(["SOL-USD", "XCN-USD"], latest, seen,
+                                         {"XCN-USD": "XCN18679-USD"}, "s", "e",
+                                         listing=_LIST, fetch=boom) == {}
+
+
+def test_a_failed_probe_changes_nothing():
+    def boom(symbols):
+        raise RuntimeError("rate limited")
+    latest = {"XCN-USD": 0.00104}
+    seen = {"XCN-USD": _date(2026, 9, 26)}
+    assert _oc.confirm_suspect_overrides(["XCN-USD"], latest, seen, {}, "s", "e",
+                                         listing=_LIST, fetch=boom) == {}

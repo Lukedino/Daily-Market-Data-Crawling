@@ -681,6 +681,54 @@ def purge_targets(symbol_overrides: dict[str, str], failed: list[str]) -> list[s
     return [t for t in symbol_overrides if t.strip().upper() not in failed_set]
 
 
+_SUSPECT_PRICE_RATIO = 2.0
+"""plain 시세가 CMC 와 이만큼 넘게 어긋나면 의심한다(교체 확정은 아니다)."""
+_CONFIRM_PRICE_RATIO = 1.5
+"""의심 종목은 CMC id 심볼의 시세가 CMC 와 이 안으로 맞을 때만 교체한다."""
+
+
+def confirm_suspect_overrides(tickers, latest, last_seen, decided, start, end,
+                              listing=None, fetch=None) -> dict[str, str]:
+    """5배 기준에 안 걸린 겹친 심볼을 CMC id 심볼의 실제 시세로 확인해 교체한다.
+
+    2026-10-01 XCN-USD: plain 은 0.00104 에 고정된 죽은 토큰(09-26 이후 봉 없음), CMC 는
+    0.00466 — 4.5배라 5배 기준을 통과해 매일 다른 토큰이 저장되고 커서까지 묶였다.
+    기준만 낮추면 변동성 큰 코인을 오판하므로, 2배 넘게 어긋나거나 최근 봉이 끊긴
+    종목만 의심하고 `{SYM}{CMCid}-USD` 가 CMC 와 1.5배 안으로 맞을 때만 교체한다.
+    """
+    listing = _cmc_listing() if listing is None else listing
+    fetch = fetch or (lambda symbols: fetch_ohlc_range(symbols, start, end)[0])
+    newest = max(last_seen.values()) if last_seen else None
+    candidates = {}
+    for ticker in tickers:
+        if ticker in decided or ticker not in latest:
+            continue
+        symbol = re.sub(r"-USD[T]?$", "", ticker.strip().upper())
+        entry = listing.get(symbol)
+        if not entry or not entry[1] or entry[1] <= 0 or not latest[ticker] or latest[ticker] <= 0:
+            continue
+        ratio = max(latest[ticker], entry[1]) / min(latest[ticker], entry[1])
+        stalled = newest is not None and (newest - last_seen[ticker]).days > STALE_TICKER_DAYS
+        if ratio > _SUSPECT_PRICE_RATIO or stalled:
+            candidates[ticker] = (f"{symbol}{entry[0]}-USD", entry[1])
+    if not candidates:
+        return {}
+    try:
+        probe = fetch([alt for alt, _ in candidates.values()])
+    except Exception:
+        return {}
+    if probe is None or probe.empty:
+        return {}
+    closes = probe.sort_values("Date").groupby("Ticker")["Close"].last().to_dict()
+    confirmed = {}
+    for ticker, (alt, cmc_price) in candidates.items():
+        close = closes.get(alt)
+        if close and close > 0 and max(close, cmc_price) / min(close, cmc_price) <= _CONFIRM_PRICE_RATIO:
+            confirmed[ticker] = alt
+            logger.warning("[CryptoResolve] 의심 종목 교체 확인")
+    return confirmed
+
+
 def build_symbol_overrides(tickers: list[str], probe_days: int = 7) -> dict[str, str]:
     """
     실행 시작 시 1회 호출해 "plain 심볼이 다른 토큰인" 종목의 교체 맵을 만든다.
@@ -705,8 +753,13 @@ def build_symbol_overrides(tickers: list[str], probe_days: int = 7) -> dict[str,
         logger.warning("[CryptoResolve] 심볼 검증용 시세를 받지 못함 — 교체 없이 진행")
         return {}
 
-    latest = (probe.sort_values("Date").groupby("Ticker")["Close"].last()).to_dict()
+    ordered = probe.sort_values("Date")
+    latest = ordered.groupby("Ticker")["Close"].last().to_dict()
     overrides = resolve_symbol_overrides(crypto, latest)
+    last_seen = pd.to_datetime(ordered.groupby("Ticker")["Date"].last()).dt.date.to_dict()
+    overrides.update(confirm_suspect_overrides(crypto, latest, last_seen, overrides,
+                                               start_dt.strftime("%Y-%m-%d"),
+                                               end_dt.strftime("%Y-%m-%d")))
 
     # 가격 대조로는 안 걸리지만 프로브의 재탐색이 실제로 알아낸 심볼도 합친다.
     # 이게 빠지면 옛 토큰이 거래정지된 종목(UNI/COMP/APT/SUI 등)이 연도별 조회에서
