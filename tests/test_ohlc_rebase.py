@@ -185,3 +185,43 @@ def test_update_market_returns_the_action_tickers_it_observed(tmp_path, monkeypa
     monkeypatch.setattr(oc, "_incremental_cursor", lambda *a, **k: date.today())
     monkeypatch.setattr(oc, "sparse_session_dates", lambda df: [])
     assert oc.update_market("us", upload=True) == ["BBB"]
+
+
+# ── ohlc-rebase 모드 (2026-10-01): 과거 접합 정리를 위한 전 종목 1회 교체 ─────────
+def test_rebase_mode_runs_the_whole_universe_per_market_without_touching_the_cursor(monkeypatch):
+    seen = []
+    monkeypatch.setattr(oc, "load_tickers", lambda market: {"us": ["AAA", "BBB"], "crypto": ["BTC-USD"]}[market])
+    monkeypatch.setattr(oc, "rebase_action_tickers",
+                        lambda market, tickers, start_year, upload: seen.append((market, tickers, start_year, upload))
+                        or {"targets": tickers, "replaced": tickers, "deferred": []})
+    monkeypatch.setattr(db, "publish_status", lambda *a, **k: pytest.fail("커서를 건드리면 안 된다"))
+    entry.run_ohlc_rebase(SimpleNamespace(dry_run=False, market="all", start_year=2020, upload_drive=True))
+    assert seen == [("us", ["AAA", "BBB"], 2020, True), ("crypto", ["BTC-USD"], 2020, True)]
+
+
+def test_rebase_mode_keeps_going_when_one_market_fails(monkeypatch):
+    started = []
+    monkeypatch.setattr(oc, "load_tickers", lambda market: [market])
+    def rebase(market, tickers, start_year, upload):
+        started.append(market)
+        if market == "us":
+            raise oc.CollectionIncompleteError("rebase_incomplete", ["AAA"])
+        return {"targets": tickers, "replaced": tickers, "deferred": []}
+    monkeypatch.setattr(oc, "rebase_action_tickers", rebase)
+    with pytest.raises(oc.CollectionIncompleteError, match="rebase_incomplete"):
+        entry.run_ohlc_rebase(SimpleNamespace(dry_run=False, market="all", start_year=2020, upload_drive=True))
+    assert started == ["us", "crypto"]
+
+
+def test_rebase_mode_dry_run_touches_nothing(monkeypatch):
+    monkeypatch.setattr(oc, "rebase_action_tickers", lambda *a, **k: pytest.fail("dry-run 은 수집하지 않는다"))
+    entry.run_ohlc_rebase(SimpleNamespace(dry_run=True, market="all", start_year=2020, upload_drive=True))
+
+
+def test_rebase_replaces_tickers_whose_old_basis_differs_without_a_basis_mismatch(local, monkeypatch):
+    """ohlc-backfill 이 막힌 바로 그 상황 — 액션 관측 없이 저장본과 전부 다른 가격(예: 나중 분할)."""
+    _fake_fetch(monkeypatch, lambda year, tickers: [_frame(t, year, 5., cap=float("nan")) for t in tickers])
+    result = oc.rebase_action_tickers("crypto", ["AAA", "BBB"], upload=False)
+    assert result["replaced"] == ["AAA", "BBB"]
+    for year in YEARS:
+        assert (db.load_year("crypto", year, strict=True)["Close"] == 5.).all()

@@ -242,6 +242,41 @@ def run_ohlc_backfill(args):
 # ohlc-update 모드
 # ══════════════════════════════════════════════════════════════════════════════
 
+
+def run_ohlc_rebase(args):
+    """
+    US/Crypto 전 종목 이력을 현재 조정 기준으로 한 번에 교체한다(수동, 2026-10-01).
+
+    ohlc-backfill 은 저장본과 다른 가격을 손상으로 보는 가격 기준 검증에 막힌다 —
+    옛 기준 행을 덮는 것이 목적이라 1,058종목 중 5% 넘게 다른 것이 당연하다
+    (2026-10-01 run 36845205510: 첫 연도에서 price_basis_mismatch). 교체가 목적인
+    rebase_action_tickers 를 유니버스 전체에 쓴다: 종목별로 전 연도를 받은 뒤에만
+    교체하고(비거나 90% 미만이면 보류), 커서는 건드리지 않는다.
+    """
+    if args.dry_run:
+        logger.info("dry_run")
+        return
+
+    from data import ohlc_collector
+    markets = ["us", "crypto"] if args.market == "all" else [args.market]
+    failures = []
+    for market in markets:
+        try:
+            tickers = ohlc_collector.load_tickers(market)
+            logger.info(f"[OhlcRebase] {market.upper()} {args.start_year}년~ 전 종목 {len(tickers)}개 교체 시작")
+            result = ohlc_collector.rebase_action_tickers(
+                market, tickers, start_year=args.start_year, upload=args.upload_drive)
+            logger.info(f"[OhlcRebase] {market.upper()} 교체 {len(result['replaced'])} / 보류 {len(result['deferred'])}")
+        except Exception as error:
+            code = getattr(error, "code", None)
+            if code is None and len(error.args) == 1:
+                code = error.args[0]
+            logger.error("market_failed",
+                         extra={"failure_code": code if isinstance(code, str) else None})
+            failures.append(error)
+    if failures:
+        raise failures[0]
+
 def run_ohlc_update(args):
     """
     US/Crypto OHLC 증분 업데이트.
@@ -742,12 +777,13 @@ def main():
 
     parser.add_argument(
         "--mode",
-        choices=["daily", "bootstrap", "ohlc-backfill", "ohlc-update", "ohlc-new-backfill",
+        choices=["daily", "bootstrap", "ohlc-backfill", "ohlc-rebase", "ohlc-update", "ohlc-new-backfill",
                  "financials-update", "kr-daily", "kr-backfill", "sector-meta"],
         required=True,
         help=(
             "daily: 오늘 수집 / bootstrap: 과거 연도 일괄 수집 / "
             "ohlc-backfill: US/Crypto OHLC 초기 적재 / "
+            "ohlc-rebase: US/Crypto 전 종목 이력을 현재 조정 기준으로 교체 (수동 1회) / "
             "ohlc-update: US/Crypto OHLC 증분 업데이트 / "
             "ohlc-new-backfill: US/Crypto 신규 종목만 골라 과거 이력 백필 / "
             "financials-update: US 재무제표 + Crypto 시장 데이터 수집 / "
@@ -855,6 +891,8 @@ def main():
             run_bootstrap(args)
         elif args.mode == "ohlc-backfill":
             run_ohlc_backfill(args)
+        elif args.mode == "ohlc-rebase":
+            run_ohlc_rebase(args)
         elif args.mode == "ohlc-update":
             run_ohlc_update(args)
         elif args.mode == "ohlc-new-backfill":
