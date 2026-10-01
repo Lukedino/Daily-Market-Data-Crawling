@@ -318,8 +318,17 @@ def run_ohlc_update(args):
                 # 증분이 게시된 뒤에만 — 배당·분할 종목의 전체 이력 교체(DM-04). 이미 최신이라
                 # 수집이 없었으면(None) 그날은 재수집 대상도 새로 생기지 않는다.
                 if action_tickers is not None:
-                    ohlc_collector.rebase_action_tickers(
-                        market, action_tickers, upload=args.upload_drive)
+                    try:
+                        ohlc_collector.rebase_action_tickers(
+                            market, action_tickers, upload=args.upload_drive)
+                    except ohlc_collector.CollectionIncompleteError as error:
+                        # 그날 증분은 이미 게시됐다. 과거 이력 교체의 하드 실패(레이트리밋 등)로
+                        # 잡 전체를 실패시키면 매일 거짓 실패 알림이 간다 — 대상은 재시도 목록에
+                        # 남아 다음 실행이 이어 받는다(2026-10-01: 크립토 초저가·심볼 겹침 종목이
+                        # 매번 하드 실패). 수동 ohlc-rebase 모드는 지금처럼 실패로 끝난다.
+                        if error.code != "rebase_incomplete":
+                            raise
+                        logger.warning("rebase_deferred")
             except Exception as error:
                 # raise failures[0] 는 첫 시장의 예외만 올린다 — 두 번째 시장의
                 # 원인이 artifact 에서 통째로 사라지므로 시장마다 한 줄 남긴다.

@@ -242,3 +242,25 @@ def test_rebase_mode_continues_only_the_deferred_list_when_one_is_queued(monkeyp
                         or {"targets": tickers, "replaced": tickers, "deferred": []})
     entry.run_ohlc_rebase(SimpleNamespace(dry_run=False, market="all", start_year=2020, upload_drive=True))
     assert seen == [("us", []), ("crypto", ["BTC-USD"])], "US 는 보류 목록만(함수가 pending 을 합친다), 크립토는 목록이 비어 전 종목"
+
+
+def test_daily_run_treats_a_rebase_hard_failure_as_a_warning(monkeypatch, caplog):
+    """그날 증분은 이미 게시됐다 — 과거 이력 교체 실패로 매일 잡을 실패시키지 않는다."""
+    monkeypatch.setattr(oc, "backfill_new_tickers", lambda **kwargs: [])
+    monkeypatch.setattr(oc, "update_market", lambda market, upload: ["SHIB-USD"])
+    def rebase(market, tickers, upload):
+        raise oc.CollectionIncompleteError("rebase_incomplete", ["SHIB-USD"])
+    monkeypatch.setattr(oc, "rebase_action_tickers", rebase)
+    with caplog.at_level(logging.WARNING):
+        entry.run_ohlc_update(SimpleNamespace(dry_run=False, market="crypto", upload_drive=True))
+    assert any(r.msg == "rebase_deferred" for r in caplog.records)
+
+
+def test_daily_run_still_fails_on_other_rebase_errors(monkeypatch):
+    monkeypatch.setattr(oc, "backfill_new_tickers", lambda **kwargs: [])
+    monkeypatch.setattr(oc, "update_market", lambda market, upload: ["AAA"])
+    def rebase(market, tickers, upload):
+        raise db.DriveSyncError("업로드 실패")
+    monkeypatch.setattr(oc, "rebase_action_tickers", rebase)
+    with pytest.raises(db.DriveSyncError):
+        entry.run_ohlc_update(SimpleNamespace(dry_run=False, market="us", upload_drive=True))
