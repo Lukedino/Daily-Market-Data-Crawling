@@ -287,6 +287,27 @@ def test_unverified_universe_blocks_dart_and_publish(monkeypatch, fault):
     assert u.uploads == []
 
 
+def test_newer_live_snapshot_is_used_as_universe(monkeypatch):
+    # 원천 캐시는 05시 KST 에 그날 파일을 만들고 기준본은 23시 KST kr-daily 에서야 따라잡는다
+    # — 평일 낮 실행은 항상 하루 앞선 스냅숏을 본다(2026-10-01 universe_unverified).
+    from data import kr_collector
+    setup_kr(monkeypatch, marcap(date(2026, 9, 30)), observed=date(2026, 10, 1))
+    live = pd.DataFrame([{"Code": "000660", "Stocks": 7, "Marcap": 900, "Date": date(2026, 10, 1)}])
+    monkeypatch.setattr(kr_collector, "read_krx_snapshot", lambda: live)
+    universe = kr._load_verified_universe(1000, date(2026, 10, 1), upload=False)
+    assert list(universe["Code"]) == ["000660"]
+    assert universe.attrs["source_date"] == date(2026, 10, 1)
+
+
+def test_live_snapshot_rows_must_match_its_source_date(monkeypatch):
+    from data import kr_collector
+    setup_kr(monkeypatch, marcap(date(2026, 9, 30)), observed=date(2026, 10, 1))
+    live = pd.DataFrame([{"Code": "000660", "Stocks": 7, "Marcap": 900, "Date": date(2026, 9, 30)}])
+    monkeypatch.setattr(kr_collector, "read_krx_snapshot", lambda: live)
+    with pytest.raises(db.FinancialsStateError, match="universe_unverified"):
+        kr._load_verified_universe(1000, date(2026, 10, 1), upload=False)
+
+
 def test_calendar_no_reports_never_constructs_dart(monkeypatch):
     setup_kr(monkeypatch, marcap(date(2026, 2, 2)), observed=date(2026, 2, 2))
     monkeypatch.setattr(kr, "_get_dart", lambda: pytest.fail("no DART construction"))

@@ -239,8 +239,17 @@ def _load_verified_universe(top_n, snap, *, upload, uploader=None):
                 or source_date > snap or universe.attrs["latest_known_date"] != source_date):
             raise ValueError()
         observed = read_krx_snapshot()
-        if snapshot_source_date(observed) != source_date:
+        observed_date = snapshot_source_date(observed)
+        if observed_date < source_date:
             raise ValueError()
+        # 원천 캐시는 05시 KST 에 그날 파일을 만들고 기준본은 23시 KST kr-daily 에서야 따라잡는다.
+        # 평일 낮 실행은 늘 하루 앞선 스냅숏을 보므로, 더 새로우면 같은 원천의 그 스냅숏으로 고른다
+        # (2026-10-01 universe_unverified). 오래된 기준본으로 고르지 않는다는 원칙은 그대로다.
+        if observed_date > source_date:
+            universe = build_universe(observed, top_n)
+            source_date = universe.attrs.get("source_date")
+            if universe.empty or source_date != observed_date or source_date > snap:
+                raise ValueError()
         return universe
     except Exception:
         raise financials_db.FinancialsStateError("universe_unverified") from None
