@@ -112,6 +112,14 @@ def _validated_frame(frame, kind, year=None):
                    for y, q, d in zip(result["Year"], result["Quarter"], result["PeriodDate"])):
             raise FinancialsStateError("financials_period_invalid")
     text = {"Ticker", "PeriodDate", "SnapDate", "Name", "Sector", "Industry", "Year", "Quarter"}
+    if kind == "ratios":
+        # 비율의 ±inf 는 "정의되지 않음"(이익 0 이하의 PER 등)이다. 09-22 이전 코드가
+        # 그대로 저장한 기준본(us_ratios_2026: PE·PS 4행)을 결측으로 읽어, 손상이 아닌
+        # 값 하나가 월간 실행 전체를 막지 않게 한다. 문자열 등 다른 이상값은 그대로 거부.
+        for column in (set(_columns(kind)) & set(result.columns)) - text:
+            result[column] = result[column].map(
+                lambda x: None if isinstance(x, numbers.Real) and not isinstance(x, bool)
+                and not pd.isna(x) and math.isinf(x) else x)
     for column in (set(_columns(kind)) & set(result.columns)) - text:
         if not result[column].map(lambda x: x is None or x is pd.NA or
                                  (isinstance(x, numbers.Real) and not isinstance(x, bool)

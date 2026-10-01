@@ -391,3 +391,34 @@ def test_real_drive_upload_string_contract_is_accepted(monkeypatch):
     http.MediaFileUpload = lambda *a, **kw: object()
     monkeypatch.setitem(sys.modules, "googleapiclient.http", http)
     assert db.upload_financials("us", [2026], uploader) == []
+
+
+# ── 2026-10-01 financials_value_invalid: 비율의 ±inf 는 결측 ─────────────────────
+# 09-04 구 코드가 야후 trailingPE "Infinity" 를 그대로 저장했고(us_ratios_2026 PE·PS 4행),
+# 09-22 strict 검증이 그 기준본을 거부해 10-01 월간 실행 전체(US·Crypto·KR)가 46초 만에 죽었다.
+@pytest.mark.parametrize("value", [float("inf"), float("-inf")])
+def test_legacy_infinite_ratio_baseline_reads_as_missing(value):
+    frame = pd.concat([ratio("AAPL"), ratio("LOSS", value=value)], ignore_index=True)
+    checked = db._validated_frame(frame, "ratios", 2026).set_index("Ticker")
+    assert checked.at["AAPL", "PE"] == 10
+    assert pd.isna(checked.at["LOSS", "PE"])
+
+
+def test_infinite_financials_value_is_still_rejected():
+    with pytest.raises(db.FinancialsStateError, match="financials_value_invalid"):
+        db._validated_frame(financial(value=float("inf")), "financials", 2026)
+
+
+def test_string_ratio_is_still_rejected():
+    with pytest.raises(db.FinancialsStateError, match="financials_value_invalid"):
+        db._validated_frame(ratio(value="Infinity"), "ratios", 2026)
+
+
+def test_collector_stores_yahoo_infinity_as_missing(monkeypatch):
+    import yfinance
+    from types import SimpleNamespace
+    info = {"trailingPE": "Infinity", "priceToSalesTrailing12Months": float("inf"),
+            "priceToBook": 2.5, "marketCap": 1e9, "shortName": "Loss Co"}
+    monkeypatch.setattr(yfinance, "Ticker", lambda t: SimpleNamespace(info=info))
+    row = fc._fetch_ratios_snapshot("LOSS", date(2026, 10, 1))
+    assert row["PE"] is None and row["PS"] is None and row["PB"] == 2.5

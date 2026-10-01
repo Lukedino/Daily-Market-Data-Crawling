@@ -13,6 +13,7 @@ Crypto:
 """
 
 import logging
+import math
 import time
 from datetime import date
 from typing import Optional
@@ -165,7 +166,10 @@ def _fetch_ratios_snapshot(ticker: str, snap_date: date) -> dict:
             return None
         try:
             f = float(val)
-            return None if pd.isna(f) else f
+            # 야후는 이익이 0 이하인 종목의 PER 등을 "Infinity" 로 준다. 비율이 정의되지
+            # 않는다는 뜻이므로 결측으로 둔다 — inf 를 저장하면 strict 기준본 검증이
+            # 다음 달 실행 전체를 막는다(2026-10-01 financials_value_invalid).
+            return f if math.isfinite(f) else None
         except Exception:
             return None
 
@@ -395,7 +399,10 @@ def collect_crypto_ratios(
             return None
         try:
             f = float(val)
-            return None if pd.isna(f) else f
+            # 야후는 이익이 0 이하인 종목의 PER 등을 "Infinity" 로 준다. 비율이 정의되지
+            # 않는다는 뜻이므로 결측으로 둔다 — inf 를 저장하면 strict 기준본 검증이
+            # 다음 달 실행 전체를 막는다(2026-10-01 financials_value_invalid).
+            return f if math.isfinite(f) else None
         except Exception:
             return None
 
