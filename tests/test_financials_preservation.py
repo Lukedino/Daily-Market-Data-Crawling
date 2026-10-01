@@ -308,6 +308,33 @@ def test_live_snapshot_rows_must_match_its_source_date(monkeypatch):
         kr._load_verified_universe(1000, date(2026, 10, 1), upload=False)
 
 
+def test_dart_connect_retries_transient_failure(monkeypatch):
+    # GHA→DART corpCode 다운로드가 한 번 끊겨 월간 KR 전체가 실패했다(2026-10-01 run 36837485902).
+    attempts, sleeps = [], []
+    def flaky():
+        attempts.append(1)
+        if len(attempts) < 3:
+            raise ConnectionError()
+        return "dart"
+    monkeypatch.setattr(kr, "_get_dart", flaky)
+    monkeypatch.setattr(kr.time, "sleep", sleeps.append)
+    assert kr._connect_dart() == "dart"
+    assert len(attempts) == 3 and len(sleeps) == 2
+
+
+def test_dart_connect_gives_up_with_typed_error(monkeypatch):
+    attempts = []
+    def down():
+        attempts.append(1)
+        raise ConnectionError()
+    monkeypatch.setattr(kr, "_get_dart", down)
+    monkeypatch.setattr(kr.time, "sleep", lambda s: None)
+    setup_kr(monkeypatch)
+    with pytest.raises(db.FinancialsStateError, match="financials_dart_unavailable"):
+        kr.collect_kr_financials(upload=False, years=[2026], today=date(2026, 9, 22))
+    assert len(attempts) == kr._DART_ATTEMPTS
+
+
 def test_calendar_no_reports_never_constructs_dart(monkeypatch):
     setup_kr(monkeypatch, marcap(date(2026, 2, 2)), observed=date(2026, 2, 2))
     monkeypatch.setattr(kr, "_get_dart", lambda: pytest.fail("no DART construction"))

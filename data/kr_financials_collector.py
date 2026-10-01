@@ -203,6 +203,24 @@ def _get_dart():
     return OpenDartReader.OpenDartReader(config.DART_API_KEY)
 
 
+_DART_ATTEMPTS = 3
+_DART_RETRY_SEC = 30
+
+
+def _connect_dart():
+    """`_get_dart` 를 일시 장애에 한해 재시도한다(30초·60초 대기, 최대 3회).
+    GHA→DART corpCode 다운로드가 한 번 끊긴 것만으로 월 1회 KR 수집 전체가
+    실패했다(2026-10-01 run 36837485902, 5분 뒤 재실행은 성공)."""
+    for attempt in range(1, _DART_ATTEMPTS + 1):
+        try:
+            return _get_dart()
+        except Exception as e:
+            if attempt == _DART_ATTEMPTS:
+                raise
+            logger.warning("[KrFinancials] dart_connect_retry attempt=%d (%s)", attempt, type(e).__name__)
+            time.sleep(_DART_RETRY_SEC * attempt)
+
+
 def _fetch_report(dart, code: str, year: int, reprt_code: str):
     """finstate 1회 호출 — 응답은 CFS·OFS 행이 함께 오며 fs_div '컬럼'으로 구분된다
     (OpenDartReader.finstate는 fs_div '인자'를 받지 않는다 — 최종 리뷰에서 실증).
@@ -307,7 +325,7 @@ def collect_kr_financials(top_n: int = 1000, upload: bool = True,
             {q for yy, q in existing.get(code, set()) if yy == y}, targets[y])
             for code in codes for y in years):
         try:
-            dart = _get_dart()
+            dart = _connect_dart()
         except Exception:
             raise financials_db.FinancialsStateError("financials_dart_unavailable") from None
     it = _tqdm(codes, desc="KR Financials", unit="종목") if _tqdm else codes
