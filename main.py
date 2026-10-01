@@ -257,13 +257,21 @@ def run_ohlc_rebase(args):
         logger.info("dry_run")
         return
 
-    from data import ohlc_collector
+    from data import ohlc_collector, ohlc_db
     markets = ["us", "crypto"] if args.market == "all" else [args.market]
+    if args.upload_drive:
+        ohlc_db.download_pending()
+    pending = ohlc_db.load_pending()
     failures = []
     for market in markets:
         try:
-            tickers = ohlc_collector.load_tickers(market)
-            logger.info(f"[OhlcRebase] {market.upper()} {args.start_year}년~ 전 종목 {len(tickers)}개 교체 시작")
+            # 보류 목록이 남아 있으면 그것만 이어서 처리한다 — 이미 교체한 종목을 다시 받지
+            # 않고, 대량 요청이 줄어 야후의 빈 응답도 줄어든다(2026-10-01 첫 실행: US 1,058 중
+            # 830 보류, 소량 재조회는 7개 연도 모두 저장본과 행 수 일치). 목록이 비면 전 종목.
+            queued = pending.get(ohlc_collector.rebase_pending_key(market)) or []
+            tickers = [] if queued else ohlc_collector.load_tickers(market)
+            logger.info(f"[OhlcRebase] {market.upper()} {args.start_year}년~ "
+                        f"{'보류분 ' + str(len(queued)) if queued else '전 종목 ' + str(len(tickers))}개 교체 시작")
             result = ohlc_collector.rebase_action_tickers(
                 market, tickers, start_year=args.start_year, upload=args.upload_drive)
             logger.info(f"[OhlcRebase] {market.upper()} 교체 {len(result['replaced'])} / 보류 {len(result['deferred'])}")

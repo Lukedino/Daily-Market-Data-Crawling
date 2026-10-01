@@ -195,6 +195,8 @@ def test_rebase_mode_runs_the_whole_universe_per_market_without_touching_the_cur
                         lambda market, tickers, start_year, upload: seen.append((market, tickers, start_year, upload))
                         or {"targets": tickers, "replaced": tickers, "deferred": []})
     monkeypatch.setattr(db, "publish_status", lambda *a, **k: pytest.fail("커서를 건드리면 안 된다"))
+    monkeypatch.setattr(db, "load_pending", lambda: {})
+    monkeypatch.setattr(db, "download_pending", lambda *a, **k: True)
     entry.run_ohlc_rebase(SimpleNamespace(dry_run=False, market="all", start_year=2020, upload_drive=True))
     assert seen == [("us", ["AAA", "BBB"], 2020, True), ("crypto", ["BTC-USD"], 2020, True)]
 
@@ -208,6 +210,8 @@ def test_rebase_mode_keeps_going_when_one_market_fails(monkeypatch):
             raise oc.CollectionIncompleteError("rebase_incomplete", ["AAA"])
         return {"targets": tickers, "replaced": tickers, "deferred": []}
     monkeypatch.setattr(oc, "rebase_action_tickers", rebase)
+    monkeypatch.setattr(db, "load_pending", lambda: {})
+    monkeypatch.setattr(db, "download_pending", lambda *a, **k: True)
     with pytest.raises(oc.CollectionIncompleteError, match="rebase_incomplete"):
         entry.run_ohlc_rebase(SimpleNamespace(dry_run=False, market="all", start_year=2020, upload_drive=True))
     assert started == ["us", "crypto"]
@@ -225,3 +229,16 @@ def test_rebase_replaces_tickers_whose_old_basis_differs_without_a_basis_mismatc
     assert result["replaced"] == ["AAA", "BBB"]
     for year in YEARS:
         assert (db.load_year("crypto", year, strict=True)["Close"] == 5.).all()
+
+
+def test_rebase_mode_continues_only_the_deferred_list_when_one_is_queued(monkeypatch):
+    """2026-10-01 첫 실행이 US 830·Crypto 64 를 보류 — 재실행은 그 목록만, 이미 교체한 종목은 다시 받지 않는다."""
+    seen = []
+    monkeypatch.setattr(db, "download_pending", lambda *a, **k: True)
+    monkeypatch.setattr(db, "load_pending", lambda: {"us": [], "us:rebase": ["ABBV"], "crypto:rebase": []})
+    monkeypatch.setattr(oc, "load_tickers", lambda market: {"us": ["AAA", "ABBV"], "crypto": ["BTC-USD"]}[market])
+    monkeypatch.setattr(oc, "rebase_action_tickers",
+                        lambda market, tickers, start_year, upload: seen.append((market, tickers))
+                        or {"targets": tickers, "replaced": tickers, "deferred": []})
+    entry.run_ohlc_rebase(SimpleNamespace(dry_run=False, market="all", start_year=2020, upload_drive=True))
+    assert seen == [("us", []), ("crypto", ["BTC-USD"])], "US 는 보류 목록만(함수가 pending 을 합친다), 크립토는 목록이 비어 전 종목"
