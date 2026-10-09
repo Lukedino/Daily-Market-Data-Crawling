@@ -157,6 +157,12 @@ Market | MarketId | Rank | Date
 
 > 4번이 폴백까지 0건이면 `sys.exit(1)`(원천 typed 실패였으면 같은 오류 코드로 raise)로 끝난다 — 조용히 넘어가면 하류가 하루 늦은
 > 데이터로 돌기 때문이다. 실패 시 `kr-daily.yml`이 텔레그램으로 알린다.
+>
+> **종목 범위 게이트(2026-10-10)**: 4번 뒤 저장 직전에 오늘 종목 수를 인접 거래일 5개의 종목 수 중앙값과 비교해
+> 90% 미만이면 저장·게시 없이 `kr_coverage_insufficient` 로 실패한다(→ 텔레그램). 저장 계층 `kr_db.save_year`
+> 도 일일·백필·폴백 모든 경로에서 **병합 후 실제로 저장될** 데이터의 이번 쓰기 대상 날짜를 같은 기준으로 판정해
+> 미달이면 `kr_coverage_gap`(기존 파일 무변경). 공개 로그에 `kr_date`·`kr_count`·`kr_baseline`·`kr_ratio_pct`·
+> `kr_source` 가 남는다. 의도한 예외는 `save_year(..., allow_gap=True)`.
 
 ---
 
@@ -215,6 +221,7 @@ python scripts/verify_kr.py --drive --fix
 
 | 날짜 | 변경 내용 |
 |------|---------|
+| 2026-10-10 | **[FIX-KR-COVERAGE-GATE]** 10-01 kr-daily 가 1순위 원천 실패(`kr_source_failed`) 뒤 검증된 yfinance 폴백이 저장본 대조를 약 8%만 통과해 **234/2,873종목**뿐인 하루를 저장·게시하고 success 로 끝났다. KR 저장 경로엔 US 같은 급감 게이트가 없었고, 하류 ML 은 그 하루 때문에 학습 게이트에 7일(10-02~10-08) 막혔다(Drive 10-01 은 10-09 수동 복구). → ① 수집 단계 `_require_daily_coverage`: 폴백·보완 뒤 오늘 종목 수 < 인접 거래일 5개 중앙값의 90% 면 `kr_coverage_insufficient` 로 저장 전 실패(연초엔 전년도 기준을 받아 붙임) ② 저장 계층 `kr_db.save_year`/`append_rows`: 병합 **후** 데이터에서 이번 쓰기 대상 날짜마다 같은 판정, 미달이면 `KrCoverageError`(`kr_coverage_gap`)로 쓰기 전 중단. US 게이트와 달리 ⓐ 부분집합 병합의 **새 날짜도 검사**(US `subset_merge` 는 기존 파일에 없던 날짜를 빼서 10-01 같은 날이 통과) ⓑ **이번 쓰기 대상 날짜만** 판정하고 기준은 중앙값이라, 이미 저장된 결손 하루가 기준을 줄이거나 이후 모든 저장을 막지 않는다(09-05 U-UN.TO 정체 반복 방지). 기준 100종목 미만은 판정 안 함(US 와 같은 하한). ③ `PublicFormatter` 에 검토된 숫자 필드(`kr_date`·`kr_count`·`kr_baseline`·`kr_ratio_pct`·`kr_source`) — 형식 검사를 통과한 값만 고정 순서로 출력. **실데이터 확인**: 현 Drive 2026 의 192거래일을 하나씩 판정해 막힌 날 0, 복구 전 10-01(234) 쓰기는 거부(기준 2,870), 전 종목 복구 쓰기는 통과. 테스트 +32(`tests/test_kr_coverage_gate.py`, 변이: 저장 게이트 제거 8건·수집 게이트 제거 3건 검출), 700 passed |
 | 2026-10-01 | **[FIX-DART-CONNECT-RETRY]** `[FIX-KR-UNIVERSE-LIVE]` 뒤 market=kr 재실행(run 36837485902)이 유니버스는 통과했지만 `OpenDartReader` 생성(corpCode ZIP 다운로드)이 GHA 에서 약 2분 만에 실패해 `financials_dart_unavailable` 로 끝났다 — 같은 키로 로컬은 1.4초 정상, 5분 뒤 재실행(run 36837977963)은 success. 월 1회 작업이 연결 한 번에 통째 실패하지 않도록 `_connect_dart()` 가 `_get_dart` 를 최대 3회(30·60초 대기) 시도, 재시도는 `dart_connect_retry` 경고로 남고 끝내 실패하면 종전 typed 오류. 테스트 +2, 653 passed |
 | 2026-10-01 | **[FIX-KR-UNIVERSE-LIVE]** `[FIX-RATIO-INFINITY]` 뒤 수동 재실행(run 36832872375)이 US·Crypto 는 끝냈지만 KR 단계에서 `universe_unverified` 로 실패. 원인: 09-22 `_load_verified_universe` 가 Drive 기준본 최신일과 실시간 KRX 스냅숏 날짜의 **완전 일치**를 요구하는데, FDR 캐시는 그날 CSV 를 **05시 KST 무렵** 만들고(09-24~10-01 첫 커밋 19:24~21:32Z 실측) 기준본은 **23시 KST kr-daily** 에서야 따라잡는다 — 거래일 05~23시엔 항상 하루 어긋나 예약(10:00 KST)·수동 실행 모두 실패, 1일이 휴장일일 때만 통과하는 구조였다. → 실시간 스냅숏이 **더 새로우면 그 스냅숏으로** 유니버스를 만들고(같은 원천·`snapshot_source_date` 검증 통과분, 행 날짜 = 원천 날짜 재확인), 더 과거면 종전대로 거부. 기준본의 연도·미래·OHLC 전용일 검사는 그대로(전년도 기준만 있으면 여전히 거부). 실데이터 확인: 10-01 스냅숏 2,873행 → 보통주 상위 1,000. 테스트 +2, 651 passed(고정 의존성 venv) |
 | 2026-10-01 | **[FIX-SUSPECT-SYMBOL]** XCN-USD 가 5배 기준을 통과해 매일 다른 토큰(plain 0.00104 고정, 09-26 이후 봉 없음)을 저장 — 진짜 Onyxcoin 은 `XCN18679-USD`(CMC 0.00466, 4.5배). → `confirm_suspect_overrides`: 2배 넘게 어긋나거나 최근 봉이 `STALE_TICKER_DAYS` 넘게 끊긴 종목만 의심하고, `{SYM}{CMCid}-USD` 시세가 CMC 와 1.5배 안이면 교체(조회 실패·더 가깝지 않으면 무변경). 실 유니버스로 XCN 교체 확인. 테스트 +4, 661 passed |

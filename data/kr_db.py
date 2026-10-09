@@ -62,6 +62,112 @@ class KrStateError(RuntimeError):
     """A KR baseline or candidate cannot be safely merged or published."""
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# 날짜별 종목 범위 게이트 (2026-10-10)
+# ══════════════════════════════════════════════════════════════════════════════
+# 2026-10-01 에 1순위 원천이 실패하고 검증된 yfinance 폴백이 저장본 대조를 약 8%만
+# 통과해, 234/2,873종목뿐인 하루가 저장·게시되고 GHA 는 success 로 끝났다. US·Crypto
+# 저장 경로(ohlc_db)에는 날짜별 급감 게이트가 있지만 KR 에는 없었고, 하류 ML 은 그
+# 하루 때문에 학습 게이트에 7일 막혔다.
+#
+# US 게이트와 다른 점 두 가지(의도):
+#   - US 는 부분집합 병합 때 기존 파일에 없던 날짜를 검사에서 뺀다. 10-01 같은 부분
+#     수집일은 바로 그 "새 날짜" 로 들어온다. 여기서는 새 날짜도 검사한다.
+#   - US 는 파일 전체의 인접일 비교라, 이미 저장된 결손 하루가 이후 모든 저장을 막는다
+#     (2026-09-05 U-UN.TO 사고). 여기서는 **이번 쓰기가 건드린 날짜만** 판정하고,
+#     기준은 인접 기존 거래일들의 중앙값이라 기준 창의 결손 하루가 기준을 줄이지 못한다.
+COVERAGE_DROP_PCT = 10.0          # US ohlc_db·ML 소비 측 게이트와 같은 임계
+COVERAGE_BASELINE_SESSIONS = 5    # 기준 = 인접 기존 거래일 5개의 종목 수 중앙값
+COVERAGE_MIN_UNIVERSE = 100       # 기준이 이보다 작으면 판정하지 않는다(합성·초기 데이터)
+
+
+class KrCoverageError(KrStateError):
+    """이번 쓰기가 건드린 날짜의 종목 수가 정상 유니버스보다 크게 모자란다."""
+
+    code = "kr_coverage_gap"
+
+
+def session_counts(frame: Optional[pd.DataFrame]) -> pd.Series:
+    """날짜별 고유 종목 수(Date 오름차순). 비었거나 열이 없으면 빈 Series."""
+    if frame is None or frame.empty or not {"Code", "Date"}.issubset(frame.columns):
+        return pd.Series(dtype="int64", index=pd.DatetimeIndex([]))
+    dates = pd.to_datetime(frame["Date"], errors="coerce")
+    codes = frame["Code"].astype(str)
+    return codes.groupby(dates).nunique().sort_index()
+
+
+def coverage_baseline(counts: pd.Series, day, *, exclude=(),
+                      sessions: int = COVERAGE_BASELINE_SESSIONS) -> Optional[float]:
+    """day 직전 기존 거래일 sessions 개(없으면 직후)의 종목 수 중앙값. 기준이 없으면 None.
+
+    exclude(이번 쓰기 대상 날짜)는 기준에서 뺀다 — 다시 쓰는 날짜가 자기 기준이 되지 않게.
+    """
+    day = pd.Timestamp(day)
+    skip = {pd.Timestamp(d) for d in exclude}
+    usable = counts[[d not in skip for d in counts.index]] if len(counts) else counts
+    window = usable[usable.index < day].tail(sessions)
+    if window.empty:
+        window = usable[usable.index > day].head(sessions)
+    return None if window.empty else float(window.median())
+
+
+def is_coverage_short(count: int, baseline: float) -> bool:
+    """정수 비교로 경계를 고정한다 — 기준의 90.0% 는 통과, 그 아래는 미달."""
+    return count * 100 < baseline * (100 - COVERAGE_DROP_PCT)
+
+
+def check_write_coverage(merged: pd.DataFrame, existing: pd.DataFrame, write_dates, *,
+                         baseline_extra: Optional[pd.DataFrame] = None):
+    """병합 후 저장될 merged 에서 이번 쓰기가 건드린 날짜별 종목 수를 기존 기준과 비교한다.
+
+    반환: (미달 목록 [{"date","count","baseline"}], 기준이 없어 판정 못 한 날짜 목록)
+    """
+    after = session_counts(merged)
+    base = session_counts(existing)
+    if baseline_extra is not None and len(base) < COVERAGE_BASELINE_SESSIONS:
+        # 연초에는 같은 해 기준이 모자라다 — 전년도 마지막 거래일들을 앞에 붙인다.
+        base = pd.concat([session_counts(baseline_extra), base])
+        base = base.groupby(level=0).max().sort_index()
+    targets = sorted({pd.Timestamp(d) for d in write_dates})
+    shortfalls, unverified = [], []
+    for day in targets:
+        count = int(after.get(day, 0))
+        baseline = coverage_baseline(base, day, exclude=targets)
+        if baseline is None:
+            unverified.append((day, count))
+        elif baseline >= COVERAGE_MIN_UNIVERSE and is_coverage_short(count, baseline):
+            shortfalls.append({"date": day, "count": count, "baseline": baseline})
+    return shortfalls, unverified
+
+
+def coverage_metrics(day, count: int, baseline: Optional[float], source: str) -> dict:
+    """공개 로그용 검토된 필드(execution_safety._PUBLIC_METRICS)."""
+    metrics = {"kr_date": pd.Timestamp(day).date().isoformat(), "kr_count": int(count),
+               "kr_source": source}
+    if baseline:
+        metrics |= {"kr_baseline": int(round(baseline)), "kr_ratio_pct": count / baseline * 100}
+    return metrics
+
+
+def _require_write_coverage(merged, existing, write_dates, year: int):
+    extra = None
+    if len(session_counts(existing)) < COVERAGE_BASELINE_SESSIONS and local_path(year - 1).exists():
+        try:
+            extra = load_year(year - 1, strict=True)
+        except Exception:
+            extra = None                       # 전년도 기준을 못 읽으면 같은 해 기준만 쓴다
+    shortfalls, unverified = check_write_coverage(merged, existing, write_dates,
+                                                  baseline_extra=extra)
+    for day, count in unverified:
+        logger.warning("kr_coverage_unverified",
+                       extra={"public_metrics": coverage_metrics(day, count, None, "save_year")})
+    if shortfalls:
+        worst = min(shortfalls, key=lambda item: item["count"] / item["baseline"])
+        logger.error("kr_coverage_gap_blocked", extra={"public_metrics": coverage_metrics(
+            worst["date"], worst["count"], worst["baseline"], "save_year")})
+        raise KrCoverageError("kr_coverage_gap")
+
+
 def _validated_frame(df: pd.DataFrame, year: int, *, allow_duplicates=False) -> pd.DataFrame:
     if df.columns.has_duplicates:
         raise KrStateError("duplicate schema columns")
@@ -169,11 +275,13 @@ def _write_staged_frame(df: pd.DataFrame, year: int, destination: Path):
         os.fsync(handle.fileno())
 
 
-def save_year(df: pd.DataFrame, year: int, *, ohlc_only=False):
+def save_year(df: pd.DataFrame, year: int, *, ohlc_only=False, allow_gap=False):
     """
     연도별 Parquet 저장.
     기존 파일은 strict 읽기 후 병합. 검증된 임시 Parquet만 원자 교체한다.
     ohlc_only=True이면 기존 실측 Amount도 yfinance 추정치보다 우선한다.
+    allow_gap=False(기본)이면 병합 결과에서 이번에 쓰는 날짜별 종목 수를 기존 기준과
+    비교해, 90% 미만인 날이 있으면 아무것도 쓰지 않고 KrCoverageError 로 멈춘다.
     """
     if df.empty:
         logger.warning(f"[KrDB] 빈 DataFrame → 저장 건너뜀: marcap-{year}")
@@ -183,7 +291,11 @@ def save_year(df: pd.DataFrame, year: int, *, ohlc_only=False):
     path.parent.mkdir(parents=True, exist_ok=True)
 
     existing = load_year(year, strict=True)
+    write_dates = set(pd.to_datetime(df["Date"], errors="coerce").dropna()) if "Date" in df else set()
     df = _merge_year(df, existing, year, ohlc_only=ohlc_only)
+    if not allow_gap:
+        # 쓰기 전에 판정한다 — 실패하면 기존 파일은 한 바이트도 바뀌지 않는다.
+        _require_write_coverage(df, existing, write_dates, year)
     temporary = None
     try:
         with tempfile.NamedTemporaryFile(dir=path.parent, prefix=f".marcap-{year}-",
@@ -205,7 +317,7 @@ def save_year(df: pd.DataFrame, year: int, *, ohlc_only=False):
     )
 
 
-def append_rows(new_df: pd.DataFrame, *, ohlc_only=False) -> list[int]:
+def append_rows(new_df: pd.DataFrame, *, ohlc_only=False, allow_gap=False) -> list[int]:
     """
     새 데이터를 연도별로 분할하여 기존 파일에 append.
     Returns: 업데이트된 연도 목록
@@ -227,7 +339,7 @@ def append_rows(new_df: pd.DataFrame, *, ohlc_only=False) -> list[int]:
 
     for year, year_df in df.groupby("_year"):
         year_df = year_df.drop(columns=["_year"])
-        save_year(year_df, int(year), ohlc_only=ohlc_only)
+        save_year(year_df, int(year), ohlc_only=ohlc_only, allow_gap=allow_gap)
         updated_years.append(int(year))
 
     return sorted(updated_years)

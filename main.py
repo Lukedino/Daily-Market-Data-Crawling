@@ -415,6 +415,26 @@ def _recent_code_meta(prior, today, days: int = 7) -> dict:
     }
 
 
+def _require_daily_coverage(df, reference, *, source):
+    """오늘 수집분의 종목 수를 최근 정상 유니버스(인접 거래일 5개의 중앙값)와 비교한다."""
+    import pandas as pd
+    from data import kr_collector, kr_db
+    dates = pd.to_datetime(df["Date"])
+    day = dates.max()
+    count = int(df.loc[dates == day, "Code"].astype(str).nunique())
+    baseline = kr_db.coverage_baseline(kr_db.session_counts(reference), day, exclude={day})
+    metrics = kr_db.coverage_metrics(day, count, baseline, source)
+    if baseline is None:
+        logger.warning("kr_coverage_unverified", extra={"public_metrics": metrics})
+        return
+    if baseline < kr_db.COVERAGE_MIN_UNIVERSE:
+        return                                 # 합성·초기 데이터 — US 게이트와 같은 하한
+    if kr_db.is_coverage_short(count, baseline):
+        logger.error("kr_coverage_insufficient", extra={"public_metrics": metrics})
+        raise kr_collector.KrCollectionError("kr_coverage_insufficient")
+    logger.info("kr_coverage_checked", extra={"public_metrics": metrics})
+
+
 def run_kr_daily(args, today=None):
     """
     KR daily 수집 플로우:
@@ -468,6 +488,13 @@ def run_kr_daily(args, today=None):
     #     2026-09-08에는 폴백 경로 자체가 같은 404로 막혀 있었다.
     # 저장본은 폴백 유니버스이자 yfinance 후보의 가격 기준 대조 기준(reference)이다.
     reference = kr_db.load_year(current_year, strict=True)
+    # 종목 범위 게이트의 기준. 연초에는 같은 해 거래일이 모자라므로 전년도 기준을 붙인다
+    # (전년도 기준을 못 받으면 같은 해 기준만 — 오늘 수집을 그 때문에 막지는 않는다).
+    coverage_reference = reference
+    if len(kr_db.session_counts(reference)) < kr_db.COVERAGE_BASELINE_SESSIONS:
+        prev_year = current_year - 1
+        if kr_db.ensure_year_baselines([prev_year], download=args.upload_drive).get(prev_year) == "ok":
+            coverage_reference = pd.concat([kr_db.load_year(prev_year), reference], ignore_index=True)
     fallback_meta = _recent_code_meta(reference, today)
     if fallback_meta:
         logger.info(f"[KrDaily] 폴백 유니버스 확보: {len(fallback_meta)}종목 (기존 parquet)")
@@ -598,6 +625,11 @@ def run_kr_daily(args, today=None):
 
     # 4. 저장
     kr_collector.validate_price_basis(df)
+    # 4a. 종목 범위 게이트(2026-10-10) — 폴백·누락 보완까지 거친 뒤에도 정상 유니버스의
+    #     90% 미만이면 저장·게시하지 않고 실패한다. 10-01 에는 234/2,873종목이 저장되고
+    #     success 로 끝나 하류 ML 이 7일 막혔다. 실패는 kr-daily.yml 텔레그램 알림으로 간다.
+    _require_daily_coverage(df, coverage_reference,
+                            source="yfinance_fallback" if used_fallback else "fdr_snapshot")
     updated = kr_db.append_rows(df, ohlc_only=used_fallback)
 
     # 5. Drive 업로드

@@ -1,8 +1,11 @@
 """Cooperative local writer exclusion and public logs without provider payloads."""
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 import logging
+import math
+import numbers
 import os
 from pathlib import Path
+import re
 import sys
 
 
@@ -64,7 +67,9 @@ _EVENTS = {"operation_failed", "writer_busy", "external_output_suppressed",
            "price_basis_mismatch_tolerated",
            "kr_market_closed", "kr_calendar_unavailable", "kr_source_fallback_attempted",
            "rebase_started", "rebase_completed", "rebase_deferred",
-           "stale_ticker_excluded"}
+           "stale_ticker_excluded",
+           "kr_coverage_checked", "kr_coverage_insufficient", "kr_coverage_unverified",
+           "kr_coverage_gap_blocked"}
 # Every snake_case code raised anywhere in data/, scripts/ and main.py. A code that is
 # missing here is silently dropped from the artifact, so a failure shows as a bare
 # operation_failed with no cause — that is how the 2026-09-22 OHLC outage stayed opaque
@@ -92,7 +97,8 @@ _ERROR_CODES = {
     "financials_uploader_unavailable", "financials_value_invalid", "financials_year_invalid",
     "kr_baseline_empty_response", "kr_baseline_failed", "kr_baseline_filename_invalid",
     "kr_baseline_invalid", "kr_baseline_schema_invalid", "kr_baseline_state_mismatch",
-    "kr_baseline_unavailable", "kr_collection_empty_unverified", "kr_local_filename_invalid",
+    "kr_baseline_unavailable", "kr_collection_empty_unverified", "kr_coverage_gap",
+    "kr_coverage_insufficient", "kr_local_filename_invalid",
     "kr_snapshot_invalid", "kr_source_failed", "kr_source_too_large", "ohlc_baseline_absent",
     "ohlc_baseline_failed", "ohlc_baseline_incomplete", "ohlc_baseline_inconsistent",
     "ohlc_baseline_name_invalid", "ohlc_market_invalid", "ohlc_remote_unconfigured",
@@ -109,6 +115,57 @@ _ERROR_CODES = {
 }
 
 
+_DATE_TEXT = re.compile(r"\d{4}-\d{2}-\d{2}")
+_METRIC_SOURCES = frozenset({"fdr_snapshot", "yfinance_fallback", "save_year", "official_marcap"})
+
+
+def _metric_date(value):
+    return value if isinstance(value, str) and _DATE_TEXT.fullmatch(value) else None
+
+
+def _metric_count(value):
+    if isinstance(value, bool) or not isinstance(value, numbers.Integral):
+        return None
+    return str(int(value)) if 0 <= int(value) < 10 ** 9 else None
+
+
+def _metric_pct(value):
+    if isinstance(value, bool) or not isinstance(value, numbers.Real):
+        return None
+    value = float(value)
+    return f"{value:.1f}" if math.isfinite(value) and 0 <= value <= 10_000 else None
+
+
+def _metric_source(value):
+    return value if isinstance(value, str) and value in _METRIC_SOURCES else None
+
+
+# 공개 artifact 에 숫자로만 남기는 검토된 필드(2026-10-10, KR 종목 범위 게이트).
+# 보존 계약(docs/2026-09-22-data-preservation.md)의 "원문 대신 별도 검토한 구조화 필드"
+# 다. 값마다 형식을 검사하고 통과한 것만 고정 순서로 쓴다 — 경로·URL·임의 문자열은
+# 형식이 맞지 않아 버려진다. 새 필드는 여기에 검사기와 함께 추가한다.
+_PUBLIC_METRICS = (
+    ("kr_date", _metric_date),
+    ("kr_count", _metric_count),
+    ("kr_baseline", _metric_count),
+    ("kr_ratio_pct", _metric_pct),
+    ("kr_source", _metric_source),
+)
+
+
+def _format_metrics(record):
+    metrics = getattr(record, "public_metrics", None)
+    if not isinstance(metrics, dict):
+        return ""
+    parts = []
+    for name, check in _PUBLIC_METRICS:
+        if name in metrics:
+            text = check(metrics[name])
+            if text is not None:
+                parts.append(f"{name}={text}")
+    return (" " + " ".join(parts)) if parts else ""
+
+
 class PublicFormatter(logging.Formatter):
     """Never interpolate raw messages, args, exception or stack text into artifacts.
 
@@ -122,7 +179,8 @@ class PublicFormatter(logging.Formatter):
         level = record.levelname if record.levelname in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"} else "LOG"
         code = getattr(record, "failure_code", None)
         detail = f" code={code}" if isinstance(code, str) and code in _ERROR_CODES else ""
-        return f"{self.formatTime(record)} [{level}] {source}:{int(record.lineno)} {event}{detail}"
+        return (f"{self.formatTime(record)} [{level}] {source}:{int(record.lineno)} {event}{detail}"
+                f"{_format_metrics(record)}")
 
 
 def configure_logging(path=None):
