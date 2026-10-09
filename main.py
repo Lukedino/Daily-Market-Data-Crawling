@@ -415,6 +415,75 @@ def _recent_code_meta(prior, today, days: int = 7) -> dict:
     }
 
 
+def _settle_official_years(years, *, settle_from=None):
+    """게시 직전 공식값 정정. 반환: (정정으로 다시 쓴 연도, 공식 원천 실패 오류 또는 None).
+
+    공식 원천을 못 받거나 형식이 틀리면 그 연도는 건드리지 않고 오류를 돌려준다 —
+    호출자는 잠정 데이터를 게시한 뒤 그 오류로 실패해 알림을 보낸다.
+    """
+    import config
+    from data import kr_collector, kr_official
+    floor = settle_from or config.KR_OFFICIAL_SETTLE_FROM
+    settled, failure = [], None
+    for year in sorted(set(years)):
+        try:
+            report = kr_official.settle_year(int(year), settle_from=floor)
+        except kr_collector.KrCollectionError as error:
+            code = error.args[0] if len(error.args) == 1 else None
+            logger.error("kr_official_failed", extra={"failure_code": code if isinstance(code, str) else None})
+            failure = failure or error
+            continue
+        if report.get("written"):
+            settled.append(int(year))
+    return settled, failure
+
+
+def _official_staleness(year):
+    """공식 확정이 지나치게 늦으면(잠정 거래일이 한도 초과) 실패 오류를 돌려준다."""
+    import config
+    from data import kr_official
+    pending = kr_official.provisional_sessions(year, settle_from=config.KR_OFFICIAL_SETTLE_FROM)
+    if pending > kr_official.STALE_AFTER_SESSIONS:
+        logger.error("kr_official_stale", extra={"public_metrics": {"kr_provisional_sessions": pending}})
+        return kr_official.OfficialStale()
+    return None
+
+
+def run_kr_settle(args):
+    """공식값 정정만 실행한다(수동). --start-date 로 하한을 지정한다.
+
+    하한을 config.KR_OFFICIAL_SETTLE_FROM 보다 앞으로 내리는 것은 과거 이력의 일괄 정정이다 —
+    별도 승인 뒤, 예약 writer 와 겹치지 않는 시간에 실행한다.
+    """
+    if args.dry_run:
+        logger.info("dry_run")
+        return
+    import config
+    import pandas as pd
+    from datetime import date as _date
+    from data import kr_db
+    settle_from = args.start_date or config.KR_OFFICIAL_SETTLE_FROM
+    try:
+        floor = pd.Timestamp(_date.fromisoformat(settle_from))
+    except ValueError:
+        logger.error("[KrSettle] 날짜 형식 오류 (YYYY-MM-DD)")
+        sys.exit(1)
+    years = list(range(max(floor.year, config.KR_OFFICIAL_MIN_YEAR), _date.today().year + 1))
+    states = kr_db.ensure_year_baselines(years, download=args.upload_drive)
+    if "failed" in states.values():
+        logger.error("[KrSettle] 기준 연도 파일 확인 실패 — 정정 없이 중단")
+        sys.exit(1)
+    targets = [year for year in years if states.get(year) == "ok"]
+    settled, official_error = _settle_official_years(targets, settle_from=floor.date().isoformat())
+    if args.upload_drive and settled:
+        failed_files = kr_db.upload_years(settled)
+        if failed_files:
+            logger.error(f"[KrSettle] Drive 업로드 실패: {failed_files}")
+            sys.exit(1)
+    if official_error is not None:
+        raise official_error
+
+
 def _require_daily_coverage(df, reference, *, source):
     """오늘 수집분의 종목 수를 최근 정상 유니버스(인접 거래일 5개의 중앙값)와 비교한다."""
     import pandas as pd
@@ -632,6 +701,19 @@ def run_kr_daily(args, today=None):
                             source="yfinance_fallback" if used_fallback else "fdr_snapshot")
     updated = kr_db.append_rows(df, ohlc_only=used_fallback)
 
+    # 4b. 공식값 정정(2026-10-10) — 게시 직전에 marcap 이 실제로 제공한 날짜를 공식 OHLCV 로
+    #     바꾸고 빠진 종목·날짜를 채운다. 오늘 잠정 수집이 공식 날짜를 건드렸더라도 여기서
+    #     되돌아가므로 게시본에는 공식값이 남는다. 1월엔 전년도 12월 잠정분도 정정한다.
+    settle_years = [current_year]
+    if today.month == 1:
+        prev_year = current_year - 1
+        if kr_db.ensure_year_baselines([prev_year], download=args.upload_drive).get(prev_year) == "ok":
+            settle_years.insert(0, prev_year)
+    settled, official_error = _settle_official_years(settle_years)
+    if official_error is None:
+        official_error = _official_staleness(current_year)
+    updated = sorted(set(updated) | set(settled))
+
     # 5. Drive 업로드
     if args.upload_drive and updated:
         failed_files = kr_db.upload_years(updated)
@@ -646,6 +728,9 @@ def run_kr_daily(args, today=None):
     existing = kr_db.load_status()
     total_days = existing.get("trading_days_total", 0) + 1
     kr_db.save_status(last_saved_date, total_days)
+    if official_error is not None:
+        # 잠정 데이터는 이미 게시됐다 — 정정 실패·지연만 실패로 알린다(→ 텔레그램).
+        raise official_error
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -720,6 +805,9 @@ def run_kr_backfill(args):
 
     kr_collector.validate_price_basis(df)
     updated = kr_db.append_rows(df, ohlc_only=True)
+    # 수동 백필(yfinance)이 공식 날짜를 덮었으면 게시 전에 공식값으로 되돌린다.
+    settled, official_error = _settle_official_years(updated)
+    updated = sorted(set(updated) | set(settled))
 
     if args.upload_drive and updated:
         failed_files = kr_db.upload_years(updated)
@@ -727,6 +815,8 @@ def run_kr_backfill(args):
             logger.error(f"[KrBackfill] Drive 업로드 실패: {failed_files}")
             sys.exit(1)
         logger.info(f"[KrBackfill] Drive 업로드 완료: {updated}")
+    if official_error is not None:
+        raise official_error
 
     # Failed publication must not be recorded as a successful backfill.
     last_date = collected_dates.max()
@@ -827,7 +917,7 @@ def main():
     parser.add_argument(
         "--mode",
         choices=["daily", "bootstrap", "ohlc-backfill", "ohlc-rebase", "ohlc-update", "ohlc-new-backfill",
-                 "financials-update", "kr-daily", "kr-backfill", "sector-meta"],
+                 "financials-update", "kr-daily", "kr-backfill", "kr-settle", "sector-meta"],
         required=True,
         help=(
             "daily: 오늘 수집 / bootstrap: 과거 연도 일괄 수집 / "
@@ -838,6 +928,7 @@ def main():
             "financials-update: US 재무제표 + Crypto 시장 데이터 수집 / "
             "kr-daily: KR 오늘 스냅샷 수집 (FDR) / "
             "kr-backfill: KR 과거 누락 구간 수집 (yfinance) / "
+            "kr-settle: KR 잠정값을 공식 일봉(FinanceData/marcap)으로 정정 (--start-date 하한) / "
             "sector-meta: US/Crypto 종목 메타데이터 수집 (Sector/Industry, 주 1회)"
         ),
     )
@@ -952,6 +1043,8 @@ def main():
             run_kr_daily(args)
         elif args.mode == "kr-backfill":
             run_kr_backfill(args)
+        elif args.mode == "kr-settle":
+            run_kr_settle(args)
         elif args.mode == "sector-meta":
             run_sector_meta(args)
 

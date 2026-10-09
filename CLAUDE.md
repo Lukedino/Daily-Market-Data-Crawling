@@ -96,6 +96,10 @@ python main.py --mode kr-backfill --start-date 2026-01-02 --end-date 2026-03-31 
 # 드라이런 (저장 없음)
 python main.py --mode kr-daily --dry-run
 
+# KR 공식값(marcap) 정정 — 기본 하한은 KR_OFFICIAL_SETTLE_FROM, 일괄 정정은 별도 승인 뒤에만
+python main.py --mode kr-settle --upload-drive
+python main.py --mode kr-settle --start-date 2026-01-02 --upload-drive   # 2026 일괄 정정(승인 필요)
+
 # 신규 종목만 과거 이력 백필
 python main.py --mode ohlc-new-backfill --market us --upload-drive
 ```
@@ -166,6 +170,28 @@ Market | MarketId | Rank | Date
 
 ---
 
+## 공식값 정정 (kr-daily · kr-backfill · kr-settle)
+
+당일 fdr 스냅숏은 **잠정값**이다(거래량은 공식보다 항상 작고, 일부 가격도 다르다). 공식 원천은
+`FinanceData/marcap` 의 `data/marcap-{year}.parquet`(같은 18열 스키마, 약 2거래일 늦게 게시, 원주가 = yfinance 원가격).
+`data/kr_official.py` 가 공식 파일이 **실제로 제공한 날짜만** 정정한다:
+
+- **측정값**(Open·High·Low·Close·Volume·Amount·Changes·ChangesRatio·Marcap·Stocks): 공식값. 공식이 NaN 이면 저장값 유지
+- **채움만**(Name·Dept·MarketId·Market): 저장값 우선, 비었을 때만 공식(Market 은 MarketId→KOSPI/KOSDAQ/KONEX — marcap 의 `KOSDAQ GLOBAL` 은 쓰지 않음)
+- **ChangeCode**: 저장 코드의 방향(1·4 상승 / 2·5 하락 / 3·0 보합)이 공식 Changes 부호와 맞으면 유지, 다르면 1·2·3 로
+- **Rank**: 시장 내 순위로 다시 매긴다(marcap 은 전체 시장 순위라 정의가 다름)
+- 공식에만 있는 행은 추가(누락 날짜·종목 복원), 우리에만 있는 행은 그대로
+- 정정 하한 `KR_OFFICIAL_SETTLE_FROM`(기본 `2026-10-12`, 배포 때 확정) 이전 날짜와 `KR_OFFICIAL_MIN_YEAR`(2026) 이전 연도는 건드리지 않는다 — 닫힌 2025 이하는 바이트 불변
+- **멱등**: 같은 공식 파일로 다시 돌면 추가 0·교체 0. 정정된 날짜는 이후 잠정 수집이 덮어쓰지 않는다(kr-daily 는 오늘만 쓰고, 정정은 그 뒤에 돈다)
+- 상태·이력은 parquet 스키마 메타데이터(`kr_official_through`·`kr_official_source`·`kr_settlement_log` 최근 30건) — SA 가 Drive 새 파일을 못 만들어 별도 메타 파일을 두지 않는다
+
+kr-daily 는 오늘 저장 뒤 현재 연도(1월엔 전년도도)를 정정하고, kr-backfill 은 갱신한 연도를 업로드 전에 정정한다.
+공식 원천 실패(`kr_official_unavailable`·`kr_official_invalid`)는 잠정 데이터를 **보존한 채 업로드까지 끝낸 뒤** 같은 코드로
+실패해 텔레그램이 울린다. 공식 경계 뒤 잠정 거래일이 10일을 넘으면 `kr_official_stale`. 공식 파일이 아직 없는 연도(404)는
+`kr_official_absent` 경고만. 공개 로그 지표: `kr_official_through`·`kr_dates`·`kr_rows_added`·`kr_rows_replaced`·`kr_provisional_sessions`.
+
+---
+
 ## 검증 스크립트
 
 ```bash
@@ -221,6 +247,7 @@ python scripts/verify_kr.py --drive --fix
 
 | 날짜 | 변경 내용 |
 |------|---------|
+| 2026-10-10 | **[FEAT-KR-OFFICIAL-SETTLE]** 2026 KR 저장본이 공식(marcap)과 어긋난 원인 확정: 1~3월은 yfinance **조정** 가격·Marcap 결측·누락 종목, 4~10월은 fdr 당일 최종 스냅숏 자체가 공식과 다름(거래량 항상 작음). 2025 는 696,524행 100% 일치. → 잠정 수집 뒤 공식 제공 날짜를 필드 정책대로 정정(`data/kr_official.py`, 위 "공식값 정정" 절), kr-daily·kr-backfill 에 연결, 수동 `--mode kr-settle`. **실데이터 사본 확인**(업로드 없음): 기본 하한 2026-10-12 → 변경 0 · 하한 2026-01-02 → 186일, 추가 5,246·교체 301,332행(550,336→555,582), 정정 뒤 OHLCV 공식과 불일치 0, 재실행 계획 0/0, 2025 파일 해시 불변. 운영 일괄 정정은 별도 승인 대기. 테스트 +44(`tests/test_kr_official.py` 40 포함), 744 passed |
 | 2026-10-10 | **[FIX-KR-COVERAGE-GATE]** 10-01 kr-daily 가 1순위 원천 실패(`kr_source_failed`) 뒤 검증된 yfinance 폴백이 저장본 대조를 약 8%만 통과해 **234/2,873종목**뿐인 하루를 저장·게시하고 success 로 끝났다. KR 저장 경로엔 US 같은 급감 게이트가 없었고, 하류 ML 은 그 하루 때문에 학습 게이트에 7일(10-02~10-08) 막혔다(Drive 10-01 은 10-09 수동 복구). → ① 수집 단계 `_require_daily_coverage`: 폴백·보완 뒤 오늘 종목 수 < 인접 거래일 5개 중앙값의 90% 면 `kr_coverage_insufficient` 로 저장 전 실패(연초엔 전년도 기준을 받아 붙임) ② 저장 계층 `kr_db.save_year`/`append_rows`: 병합 **후** 데이터에서 이번 쓰기 대상 날짜마다 같은 판정, 미달이면 `KrCoverageError`(`kr_coverage_gap`)로 쓰기 전 중단. US 게이트와 달리 ⓐ 부분집합 병합의 **새 날짜도 검사**(US `subset_merge` 는 기존 파일에 없던 날짜를 빼서 10-01 같은 날이 통과) ⓑ **이번 쓰기 대상 날짜만** 판정하고 기준은 중앙값이라, 이미 저장된 결손 하루가 기준을 줄이거나 이후 모든 저장을 막지 않는다(09-05 U-UN.TO 정체 반복 방지). 기준 100종목 미만은 판정 안 함(US 와 같은 하한). ③ `PublicFormatter` 에 검토된 숫자 필드(`kr_date`·`kr_count`·`kr_baseline`·`kr_ratio_pct`·`kr_source`) — 형식 검사를 통과한 값만 고정 순서로 출력. **실데이터 확인**: 현 Drive 2026 의 192거래일을 하나씩 판정해 막힌 날 0, 복구 전 10-01(234) 쓰기는 거부(기준 2,870), 전 종목 복구 쓰기는 통과. 테스트 +32(`tests/test_kr_coverage_gate.py`, 변이: 저장 게이트 제거 8건·수집 게이트 제거 3건 검출), 700 passed |
 | 2026-10-01 | **[FIX-DART-CONNECT-RETRY]** `[FIX-KR-UNIVERSE-LIVE]` 뒤 market=kr 재실행(run 36837485902)이 유니버스는 통과했지만 `OpenDartReader` 생성(corpCode ZIP 다운로드)이 GHA 에서 약 2분 만에 실패해 `financials_dart_unavailable` 로 끝났다 — 같은 키로 로컬은 1.4초 정상, 5분 뒤 재실행(run 36837977963)은 success. 월 1회 작업이 연결 한 번에 통째 실패하지 않도록 `_connect_dart()` 가 `_get_dart` 를 최대 3회(30·60초 대기) 시도, 재시도는 `dart_connect_retry` 경고로 남고 끝내 실패하면 종전 typed 오류. 테스트 +2, 653 passed |
 | 2026-10-01 | **[FIX-KR-UNIVERSE-LIVE]** `[FIX-RATIO-INFINITY]` 뒤 수동 재실행(run 36832872375)이 US·Crypto 는 끝냈지만 KR 단계에서 `universe_unverified` 로 실패. 원인: 09-22 `_load_verified_universe` 가 Drive 기준본 최신일과 실시간 KRX 스냅숏 날짜의 **완전 일치**를 요구하는데, FDR 캐시는 그날 CSV 를 **05시 KST 무렵** 만들고(09-24~10-01 첫 커밋 19:24~21:32Z 실측) 기준본은 **23시 KST kr-daily** 에서야 따라잡는다 — 거래일 05~23시엔 항상 하루 어긋나 예약(10:00 KST)·수동 실행 모두 실패, 1일이 휴장일일 때만 통과하는 구조였다. → 실시간 스냅숏이 **더 새로우면 그 스냅숏으로** 유니버스를 만들고(같은 원천·`snapshot_source_date` 검증 통과분, 행 날짜 = 원천 날짜 재확인), 더 과거면 종전대로 거부. 기준본의 연도·미래·OHLC 전용일 검사는 그대로(전년도 기준만 있으면 여전히 거부). 실데이터 확인: 10-01 스냅숏 2,873행 → 보통주 상위 1,000. 테스트 +2, 651 passed(고정 의존성 venv) |

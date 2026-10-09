@@ -69,7 +69,9 @@ _EVENTS = {"operation_failed", "writer_busy", "external_output_suppressed",
            "rebase_started", "rebase_completed", "rebase_deferred",
            "stale_ticker_excluded",
            "kr_coverage_checked", "kr_coverage_insufficient", "kr_coverage_unverified",
-           "kr_coverage_gap_blocked"}
+           "kr_coverage_gap_blocked",
+           "kr_official_settled", "kr_official_absent", "kr_official_failed",
+           "kr_official_stale"}
 # Every snake_case code raised anywhere in data/, scripts/ and main.py. A code that is
 # missing here is silently dropped from the artifact, so a failure shows as a bare
 # operation_failed with no cause — that is how the 2026-09-22 OHLC outage stayed opaque
@@ -98,7 +100,8 @@ _ERROR_CODES = {
     "kr_baseline_empty_response", "kr_baseline_failed", "kr_baseline_filename_invalid",
     "kr_baseline_invalid", "kr_baseline_schema_invalid", "kr_baseline_state_mismatch",
     "kr_baseline_unavailable", "kr_collection_empty_unverified", "kr_coverage_gap",
-    "kr_coverage_insufficient", "kr_local_filename_invalid",
+    "kr_coverage_insufficient", "kr_local_filename_invalid", "kr_official_invalid",
+    "kr_official_stale", "kr_official_unavailable",
     "kr_snapshot_invalid", "kr_source_failed", "kr_source_too_large", "ohlc_baseline_absent",
     "ohlc_baseline_failed", "ohlc_baseline_incomplete", "ohlc_baseline_inconsistent",
     "ohlc_baseline_name_invalid", "ohlc_market_invalid", "ohlc_remote_unconfigured",
@@ -150,6 +153,11 @@ _PUBLIC_METRICS = (
     ("kr_baseline", _metric_count),
     ("kr_ratio_pct", _metric_pct),
     ("kr_source", _metric_source),
+    ("kr_official_through", _metric_date),
+    ("kr_dates", _metric_count),
+    ("kr_rows_added", _metric_count),
+    ("kr_rows_replaced", _metric_count),
+    ("kr_provisional_sessions", _metric_count),
 )
 
 

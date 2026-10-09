@@ -266,8 +266,30 @@ def _merge_year(df: pd.DataFrame, existing: pd.DataFrame, year: int, *, ohlc_onl
     return _validated_frame(merged, year)
 
 
-def _write_staged_frame(df: pd.DataFrame, year: int, destination: Path):
-    pq.write_table(pa.Table.from_pandas(df, preserve_index=False), str(destination), compression="snappy")
+def file_metadata(year: int) -> dict:
+    """저장본 parquet 의 사용자 메타데이터(pandas 키 제외). 없거나 못 읽으면 빈 dict.
+
+    열을 바꾸지 않고 파일에 붙여 두는 정보다 — 공식 확정 경계 등(data/kr_official.py).
+    """
+    path = local_path(year)
+    if not path.exists():
+        return {}
+    try:
+        metadata = pq.read_schema(str(path)).metadata or {}
+    except Exception:
+        return {}
+    return {key: value for key, value in metadata.items() if key != b"pandas"}
+
+
+def _existing_metadata(year: int) -> dict:
+    return file_metadata(year)
+
+
+def _write_staged_frame(df: pd.DataFrame, year: int, destination: Path, metadata: Optional[dict] = None):
+    table = pa.Table.from_pandas(df, preserve_index=False)
+    if metadata:
+        table = table.replace_schema_metadata({**(table.schema.metadata or {}), **metadata})
+    pq.write_table(table, str(destination), compression="snappy")
     staged = _read_year_path(destination, year)
     pd.testing.assert_frame_equal(staged, df, check_dtype=False, check_exact=True)
     # Windows _commit requires a descriptor opened for writing.
@@ -275,15 +297,19 @@ def _write_staged_frame(df: pd.DataFrame, year: int, destination: Path):
         os.fsync(handle.fileno())
 
 
-def save_year(df: pd.DataFrame, year: int, *, ohlc_only=False, allow_gap=False):
+def save_year(df: pd.DataFrame, year: int, *, ohlc_only=False, allow_gap=False,
+              file_metadata: Optional[dict] = None):
     """
     연도별 Parquet 저장.
     기존 파일은 strict 읽기 후 병합. 검증된 임시 Parquet만 원자 교체한다.
     ohlc_only=True이면 기존 실측 Amount도 yfinance 추정치보다 우선한다.
     allow_gap=False(기본)이면 병합 결과에서 이번에 쓰는 날짜별 종목 수를 기존 기준과
     비교해, 90% 미만인 날이 있으면 아무것도 쓰지 않고 KrCoverageError 로 멈춘다.
+    file_metadata 는 기존 파일의 사용자 메타데이터 위에 덮어쓴다. 주지 않으면 기존 것을
+    그대로 이어받는다 — 잠정 저장이 공식 확정 경계를 지우지 않게. 빈 df 에 file_metadata
+    만 주면 데이터는 그대로 두고 메타데이터만 갱신한다.
     """
-    if df.empty:
+    if df.empty and not file_metadata:
         logger.warning(f"[KrDB] 빈 DataFrame → 저장 건너뜀: marcap-{year}")
         return
 
@@ -291,6 +317,7 @@ def save_year(df: pd.DataFrame, year: int, *, ohlc_only=False, allow_gap=False):
     path.parent.mkdir(parents=True, exist_ok=True)
 
     existing = load_year(year, strict=True)
+    metadata = {**_existing_metadata(year), **(file_metadata or {})}
     write_dates = set(pd.to_datetime(df["Date"], errors="coerce").dropna()) if "Date" in df else set()
     df = _merge_year(df, existing, year, ohlc_only=ohlc_only)
     if not allow_gap:
@@ -301,7 +328,7 @@ def save_year(df: pd.DataFrame, year: int, *, ohlc_only=False, allow_gap=False):
         with tempfile.NamedTemporaryFile(dir=path.parent, prefix=f".marcap-{year}-",
                                          suffix=".parquet", delete=False) as handle:
             temporary = Path(handle.name)
-        _write_staged_frame(df, year, temporary)
+        _write_staged_frame(df, year, temporary, metadata)
         os.replace(temporary, path)
         temporary = None
     except Exception as error:

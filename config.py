@@ -23,6 +23,14 @@ IN_COLAB          = "google.colab" in str(sys.modules)
 # ── 로컬 임시 저장 경로 (Actions 실행 중 → Drive 업로드 후 삭제 가능) ─────────
 LOCAL_DATA_DIR = os.environ.get("LOCAL_DATA_DIR", "data/local")
 
+# KR 공식값 정정(data/kr_official.py) — 2026-10-10.
+# 하한 이전 날짜는 자동 정정하지 않는다. 그 이전 이력의 일괄 정정은 별도 승인 뒤
+# `--mode kr-settle --start-date YYYY-MM-DD` 로 실행한다. 배포일에 맞춰 확정할 값이다.
+KR_OFFICIAL_SETTLE_FROM = os.environ.get("KR_OFFICIAL_SETTLE_FROM", "2026-10-12")
+# 이 연도 이전(마감 연도)은 어떤 경로로도 정정하지 않는다 — 2025년은 공식값과 696,524행
+# 전부 일치했고, 하류 ML 의 연구 해시가 마감 연도 데이터를 쓴다.
+KR_OFFICIAL_MIN_YEAR = 2026
+
 # ── Google Drive 폴더 구조 (GDRIVE_FOLDER_ID 하위) ────────────────────────────
 # ⚠️  Crawler와 폴더 충돌 방지: quant-korea-data/ 서브폴더에 격리
 DRIVE_PATHS = {

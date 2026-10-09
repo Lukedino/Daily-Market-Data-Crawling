@@ -16,6 +16,8 @@ KR 일별은 고정 FinanceDataReader 0.9.202와 같은 공급 경로에서 원�
 
 KR Yahoo adjusted 후보와 FDR 기존 가격의 기준 일치를 입증하지 못하면 `price_basis_unverified`로 저장을 보류한다. 원래 `auto_adjust=True`를 바꾸거나 과거 값을 자동 재작성하지 않는다. 따라서 기존 fallback/backfill이 후보를 받아도 저장·완료가 차단될 수 있다. 이는 복구 완료가 아니라 가격 정책/출처 확인이 필요한 상태다.
 
+**2026-10-10 개정(사용자 결정 1A)**: KR 은 공식 원천 `FinanceData/marcap` 이 실제로 제공한 날짜에 한해 과거 값을 공식값으로 정정한다(`data/kr_official.py`). 하한(`KR_OFFICIAL_SETTLE_FROM`) 이전·닫힌 연도는 자동으로 건드리지 않고, 하한을 앞당기는 일괄 정정은 백업과 별도 승인 뒤 `--mode kr-settle --start-date` 로만 한다. 정의가 다른 필드(Rank·Market·ChangeCode)는 섞지 않고 저장 정의를 유지한다. 공식 원천 실패 시 잠정값을 보존하고 실패를 드러낸다.
+
 US/Crypto 증분의 실패·빈 결과·요청 종목 누락은 완료 커서를 전진시키지 않는다. 종목별 관측의 보수적 커서를 사용하며 해외 거래소에 US 종료일을 일괄 강제하지 않는다. 직전 저장 세션 overlap·원천 action의 불일치를 감지해 보류한다. 유한 overlap 일치는 전체 과거 조정 기준의 증명이 아니다. 기존 세션·상장/정지 판단 정책은 바꾸지 않는다.
 
 MarketCap은 새 결측 때문에 기존 관측을 지우지 않고, 숫자 0은 결측으로 처리하지 않는다. 현재 시총을 과거 날짜의 봉에 소급 복사하지 않는다. KR OHLC 전용 새 Stocks/Rank는 nullable 값으로 전달하며 기존 유효 메타는 유지한다.
