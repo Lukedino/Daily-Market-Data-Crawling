@@ -271,6 +271,7 @@ def test_malformed_official_frames_are_rejected(mutate):
 @pytest.fixture
 def daily(db, monkeypatch):
     record = SimpleNamespace(uploads=[], status=None)
+    monkeypatch.setattr(config, "KR_OFFICIAL_SETTLE_MODE", "apply")      # 일괄 정정 승인 뒤 상태
     monkeypatch.setattr(krx_calendar, "session_status", lambda day: ("open", ""))
     monkeypatch.setattr(krx_calendar, "trading_days", lambda a, b: [])
     monkeypatch.setattr(kr_db, "ensure_year_baselines", lambda years, **k: {y: "ok" for y in years})
@@ -489,3 +490,152 @@ def test_a_few_large_corrections_per_day_are_still_applied(db):
     kr_official.settle_year(YEAR, settle_from=DAYS[0], official=official)
     saved = _saved()
     assert saved[saved.Code.isin(CODES[:15]) & saved.Date.isin(DAYS[:2])].Close.eq(5000.0).all()
+
+
+# ── 승인 전 계획 모드 · 운영과 같은 검증 경로 · 휴장일 복사 행 삭제 (2026-10-10 후속) ──────
+
+def _settle_args(**overrides):
+    base = dict(dry_run=False, upload_drive=False, start_date=DAYS[0].date().isoformat(),
+                plan=False, drop_closed_dates=None, report=None)
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+def _read_report(path):
+    import json
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def test_config_defaults_cover_2026_but_only_plan_until_approved():
+    source = Path(config.__file__).read_text(encoding="utf-8")
+    assert 'os.environ.get("KR_OFFICIAL_SETTLE_FROM", "2026-01-01")' in source
+    assert 'os.environ.get("KR_OFFICIAL_SETTLE_MODE", "plan")' in source
+
+
+@pytest.mark.parametrize("mode", ["plan", "", "APPLY-later", None])
+def test_daily_in_plan_mode_publishes_provisional_and_writes_no_official_values(daily, monkeypatch, mode):
+    monkeypatch.setattr(config, "KR_OFFICIAL_SETTLE_MODE", mode)
+    _run_daily(monkeypatch, _rows(DAYS[5], close=1000.0), lambda year, **k: _official(DAYS[:4]))
+    saved = _saved()
+    assert saved[saved.Date <= DAYS[3]].Close.eq(1000.0).all(), "승인 전엔 과거를 바꾸지 않는다"
+    assert DAYS[5] in set(saved.Date) and daily.uploads == [[YEAR]]
+    assert kr_official.official_through(YEAR) is None
+
+
+def test_daily_in_plan_mode_does_not_alert_on_official_outage(daily, monkeypatch):
+    monkeypatch.setattr(config, "KR_OFFICIAL_SETTLE_MODE", "plan")
+
+    def outage(year, **k):
+        raise kr_collector.KrCollectionError("kr_official_unavailable")
+    _run_daily(monkeypatch, _rows(DAYS[5]), outage)                    # 예외 없이 끝난다
+    assert daily.uploads == [[YEAR]]
+
+
+def test_plan_runs_the_write_path_without_writing(daily, monkeypatch, tmp_path):
+    monkeypatch.setattr(kr_official, "fetch_official_year", lambda year, **k: _official(DAYS[:4]))
+    before = kr_db.local_path(YEAR).read_bytes()
+    report_path = tmp_path / "plan.json"
+    kr_main.run_kr_settle(_settle_args(plan=True, report=str(report_path)))
+    assert kr_db.local_path(YEAR).read_bytes() == before and daily.uploads == []
+    [report] = _read_report(report_path)
+    assert report["applied"] is False and report["rows_replaced"] == 4 * len(CODES)
+    rec = report["reconcile"]
+    assert rec["missing_rows"] == rec["extra_rows"] == rec["duplicate_keys"] == 0
+    assert rec["ohlcv_mismatch"] == {c: 0 for c in ["Open", "High", "Low", "Close", "Volume"]}
+    assert rec["final_rows"] == 5 * len(CODES) and rec["sorted_by_date_code"] is True
+
+
+def test_plan_and_apply_share_the_coverage_gate(daily, monkeypatch):
+    monkeypatch.setattr(kr_official, "fetch_official_year", lambda year, **k: _official(DAYS[:4]))
+
+    def refuse(*a, **k):
+        raise kr_db.KrCoverageError("kr_coverage_gap")
+    monkeypatch.setattr(kr_db, "_require_write_coverage", refuse)
+    before = kr_db.local_path(YEAR).read_bytes()
+    for plan in (True, False):
+        with pytest.raises(kr_db.KrCoverageError):
+            kr_main.run_kr_settle(_settle_args(plan=plan))
+    assert kr_db.local_path(YEAR).read_bytes() == before
+
+
+def test_plan_and_apply_share_the_mass_change_guard(daily, monkeypatch):
+    official = _official(DAYS[:4])
+    official["Close"] = 5000.0
+    monkeypatch.setattr(kr_official, "fetch_official_year", lambda year, **k: official)
+    for plan in (True, False):
+        with pytest.raises(kr_collector.KrCollectionError) as caught:
+            kr_main.run_kr_settle(_settle_args(plan=plan))
+        assert caught.value.args[0] == "kr_official_invalid"
+
+
+def _with_closed_copy(db, monkeypatch, *, copy=True):
+    """DAYS[2] 를 '휴장일인데 직전 거래일(DAYS[1])을 복사한 행' 으로 만든다. 공식엔 그날이 없다."""
+    frames = [_rows(d, close=1000.0 + i) for i, d in enumerate(DAYS[:5])]
+    frames[2] = _rows(DAYS[2], close=1001.0 if copy else 1234.0)
+    kr_db.local_path(YEAR).unlink(missing_ok=True)
+    db.save_year(pd.concat(frames, ignore_index=True), YEAR)
+    closed = DAYS[2].date()
+    monkeypatch.setattr(krx_calendar, "session_status",
+                        lambda day: ("closed", "휴장") if day == closed else ("open", ""))
+    official = pd.concat([_rows(d, close=1010.0) for d in (DAYS[0], DAYS[1], DAYS[3])], ignore_index=True)
+    monkeypatch.setattr(kr_official, "fetch_official_year",
+                        lambda year, **k: kr_official.validate_official(official, YEAR))
+    return DAYS[2].date().isoformat()
+
+
+def test_verified_closed_session_copy_is_dropped_in_the_same_write(daily, db, monkeypatch, tmp_path):
+    day = _with_closed_copy(db, monkeypatch)
+    report_path = tmp_path / "r.json"
+    kr_main.run_kr_settle(_settle_args(drop_closed_dates=day, report=str(report_path)))
+    saved = _saved()
+    assert DAYS[2] not in set(saved.Date) and len(saved) == 4 * len(CODES)
+    [report] = _read_report(report_path)
+    assert report["rows_dropped"] == len(CODES)
+    [evidence] = report["closed_sessions"]
+    assert evidence["previous_session"] == DAYS[1].date().isoformat() and evidence["close_match_pct"] == 100.0
+    assert report["reconcile"]["extra_dates"] == [] and report["reconcile"]["missing_rows"] == 0
+    import json
+    log = json.loads(kr_db.file_metadata(YEAR)[kr_official.META_LOG])
+    assert log[-1]["rows_dropped"] == len(CODES) and log[-1]["dropped_dates"] == [day]
+
+
+def test_plan_shows_the_drop_without_writing(daily, db, monkeypatch, tmp_path):
+    day = _with_closed_copy(db, monkeypatch)
+    before = kr_db.local_path(YEAR).read_bytes()
+    report_path = tmp_path / "r.json"
+    kr_main.run_kr_settle(_settle_args(plan=True, drop_closed_dates=day, report=str(report_path)))
+    assert kr_db.local_path(YEAR).read_bytes() == before
+    [report] = _read_report(report_path)
+    assert report["rows_dropped"] == len(CODES) and report["reconcile"]["final_rows"] == 4 * len(CODES)
+
+
+@pytest.mark.parametrize("case", ["calendar_open", "not_a_copy", "publication_lag", "official_has_day"])
+def test_unverified_closed_session_is_never_dropped(daily, db, monkeypatch, case):
+    day = _with_closed_copy(db, monkeypatch, copy=case != "not_a_copy")
+    if case == "calendar_open":
+        monkeypatch.setattr(krx_calendar, "session_status", lambda d: ("open", ""))
+    if case == "publication_lag":                                       # 공식이 그날 이전까지만 게시
+        official = _rows(DAYS[1], close=1010.0)
+        monkeypatch.setattr(kr_official, "fetch_official_year",
+                            lambda year, **k: kr_official.validate_official(official, YEAR))
+    if case == "official_has_day":
+        official = pd.concat([_rows(d, close=1010.0) for d in DAYS[:4]], ignore_index=True)
+        monkeypatch.setattr(kr_official, "fetch_official_year",
+                            lambda year, **k: kr_official.validate_official(official, YEAR))
+    before = kr_db.local_path(YEAR).read_bytes()
+    with pytest.raises(kr_collector.KrCollectionError) as caught:
+        kr_main.run_kr_settle(_settle_args(drop_closed_dates=day))
+    assert caught.value.args[0] == "kr_closed_session_unverified"
+    assert kr_db.local_path(YEAR).read_bytes() == before
+
+
+def test_reconcile_counts_missing_extra_and_duplicate_keys():
+    official = _official(DAYS[:2])
+    final = pd.concat([_rows(DAYS[0], close=1010.0, volume=120),
+                       _rows(DAYS[1], codes=CODES[:-1], close=1010.0, volume=120),
+                       _rows(DAYS[1], codes=["999999"], close=1010.0, volume=120),
+                       _rows(DAYS[2])], ignore_index=True)
+    final = pd.concat([final, final.iloc[:1]], ignore_index=True)
+    rec = kr_official.reconcile(final, official, settle_from=DAYS[0])
+    assert rec["missing_rows"] == 1 and rec["extra_rows"] == 1 and rec["duplicate_keys"] == 1
+    assert rec["extra_dates"] == [] and rec["sorted_by_date_code"] is False

@@ -272,7 +272,7 @@ def _metadata(previous: dict, report: dict) -> dict:
             log = json.loads(raw.decode("utf-8"))
         except Exception:
             log = []
-    if report["rows_added"] or report["rows_replaced"]:
+    if report["rows_added"] or report["rows_replaced"] or report.get("rows_dropped"):
         log.append({
             "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "official_through": report["official_through"].date().isoformat(),
@@ -280,6 +280,8 @@ def _metadata(previous: dict, report: dict) -> dict:
             "first_date": report["changed_dates"][0] if report["changed_dates"] else None,
             "last_date": report["changed_dates"][-1] if report["changed_dates"] else None,
             "fields": {k: v for k, v in report["fields"].items() if v},
+            **({"rows_dropped": report["rows_dropped"], "dropped_dates": report["dropped_dates"]}
+               if report.get("rows_dropped") else {}),
         })
     return {META_THROUGH: report["official_through"].date().isoformat().encode(),
             META_SOURCE: SOURCE_NAME.encode(),
@@ -295,12 +297,81 @@ def official_through(year: int) -> Optional[pd.Timestamp]:
         return None
 
 
+CLOSED_COPY_MIN_PCT = 99.0          # 휴장일 행을 직전 거래일 종가 복사로 볼 최소 일치율
+
+
+def verify_closed_sessions(stored: pd.DataFrame, official: pd.DataFrame, dates) -> list:
+    """삭제하려는 날짜가 정말 '휴장일에 직전 거래일을 복사한 행' 인지 확인한다.
+
+    모두 만족해야 한다(하나라도 어긋나면 kr_closed_session_unverified, 아무것도 안 씀):
+      - KRX 달력(data.krx_calendar, holidays XKRX — 수집기와 같은 출처)이 휴장으로 판정
+      - 공식 파일이 그 날짜 **이후**까지 게시됐는데 그 날짜 행이 없음(게시 지연과 구분)
+      - 저장본에 그 날짜 행이 있고, 직전 저장 거래일과 공통 종목 종가가 99% 이상 같음
+    marcap 에 없다는 이유만으로는 지우지 않는다. 반환: 날짜별 근거.
+    """
+    from data import krx_calendar
+    drops = sorted({pd.Timestamp(d).normalize() for d in dates})
+    through = pd.Timestamp(official["Date"].max()) if not official.empty else None
+    sessions = sorted(set(stored["Date"]) - set(drops))
+    evidence = []
+    for day in drops:
+        status, reason = krx_calendar.session_status(day.date())
+        rows = stored[stored["Date"] == day]
+        previous = [d for d in sessions if d < day]
+        if (status != "closed" or rows.empty or through is None or day >= through
+                or official["Date"].eq(day).any() or not previous):
+            raise KrCollectionError("kr_closed_session_unverified")
+        prev_day = previous[-1]
+        pair = rows[["Code", "Close", "Volume"]].merge(
+            stored.loc[stored["Date"] == prev_day, ["Code", "Close", "Volume"]], on="Code",
+            suffixes=("", "_prev"))
+        close_pct = float(_same(pair["Close"], pair["Close_prev"]).mean() * 100) if len(pair) else 0.0
+        volume_pct = float(_same(pair["Volume"], pair["Volume_prev"]).mean() * 100) if len(pair) else 0.0
+        if len(pair) < 0.9 * len(rows) or close_pct < CLOSED_COPY_MIN_PCT:
+            raise KrCollectionError("kr_closed_session_unverified")
+        evidence.append({"date": day.date().isoformat(), "calendar": reason, "rows": int(len(rows)),
+                         "previous_session": prev_day.date().isoformat(),
+                         "close_match_pct": round(close_pct, 2), "volume_match_pct": round(volume_pct, 2)})
+    return evidence
+
+
+def reconcile(final: pd.DataFrame, official: pd.DataFrame, *, settle_from) -> dict:
+    """정정 결과와 공식 파일의 날짜·종목 집합까지 대조한다(공통 행 OHLCV 비교만으로 끝내지 않는다).
+
+    대상 범위 = 하한 ~ 공식 확정 경계. 범위 밖(경계 이후 잠정 날짜)은 세지 않는다.
+    """
+    keys = ["Code", "Date"]
+    values = ["Open", "High", "Low", "Close", "Volume"]
+    floor = pd.Timestamp(settle_from)
+    through = pd.Timestamp(official["Date"].max())
+    window = official[official["Date"] >= floor]
+    mine = final[(final["Date"] >= floor) & (final["Date"] <= through)]
+    joined = window[keys + values].merge(mine[keys + values], on=keys, how="outer",
+                                         suffixes=("_o", ""), indicator=True)
+    both = joined[joined["_merge"] == "both"]
+    ordered = final.sort_values(["Date", "Code"], kind="mergesort").index.equals(final.index)
+    return {
+        "official_through": through.date().isoformat(),
+        "missing_dates": sorted(d.date().isoformat() for d in set(window["Date"]) - set(mine["Date"])),
+        "extra_dates": sorted(d.date().isoformat() for d in set(mine["Date"]) - set(window["Date"])),
+        "missing_rows": int((joined["_merge"] == "left_only").sum()),
+        "extra_rows": int((joined["_merge"] == "right_only").sum()),
+        "duplicate_keys": int(final.duplicated(keys).sum()),
+        "sorted_by_date_code": bool(ordered),
+        "ohlcv_mismatch": {c: int((~_same(both[f"{c}_o"], both[c])).sum()) for c in values},
+        "final_rows": int(len(final)),
+    }
+
+
 def settle_year(year: int, *, settle_from, official: Optional[pd.DataFrame] = None,
-                fetch=None) -> dict:
+                fetch=None, apply: bool = True, drop_dates=()) -> dict:
     """저장본 한 연도를 공식값으로 정정한다. 공식 파일이 아직 없으면 아무것도 쓰지 않는다.
 
     `config.KR_OFFICIAL_MIN_YEAR` 이전 연도는 건드리지 않는다. 마감 연도(올해가 아닌 해)는
     바뀐 행이 있을 때만 쓴다 — 메타데이터만 바꾸려고 파일을 다시 쓰면 바이트가 달라진다.
+    apply=False 는 계획만 한다: 받기·검증·휴장일 확인·정정 계획·대량 변경 방어·종목 범위
+    게이트를 운영 쓰기와 **같은 경로**(kr_db.preview_year)로 거친 뒤 파일은 쓰지 않는다.
+    drop_dates 는 verify_closed_sessions 를 통과한 날짜만, 정정과 **한 번의 원자 쓰기**로 지운다.
     """
     if year < config.KR_OFFICIAL_MIN_YEAR:
         return {"year": year, "absent": False, "written": False, "skipped": "closed_year"}
@@ -312,21 +383,40 @@ def settle_year(year: int, *, settle_from, official: Optional[pd.DataFrame] = No
             logger.info("kr_official_absent")
             return {"year": year, "absent": True, "written": False}
     stored = kr_db.load_year(year, strict=True)
-    rows, report = plan_settlement(stored, official, settle_from=settle_from)
-    report.update({"year": year, "absent": False, "written": False})
+    drops = sorted({pd.Timestamp(d).normalize() for d in drop_dates})
+    evidence = verify_closed_sessions(stored, official, drops) if drops else []
+    dropped = stored["Date"].isin(drops)
+    rows, report = plan_settlement(stored[~dropped], official, settle_from=settle_from)
+    report.update({"year": year, "absent": False, "written": False, "applied": apply,
+                   "rows_dropped": int(dropped.sum()),
+                   "dropped_dates": [d.date().isoformat() for d in drops],
+                   "closed_sessions": evidence, "rows_before": int(len(stored))})
     if report["official_through"] is None:
         return report
     through = official_through(year)
     open_year = year >= datetime.now(timezone.utc).year
-    if not rows.empty or (open_year and through != report["official_through"]):
+    target = rows if not rows.empty else stored.iloc[0:0]
+    metrics = {"kr_official_through": report["official_through"].date().isoformat(),
+               "kr_dates": report["dates"], "kr_rows_added": report["rows_added"],
+               "kr_rows_replaced": report["rows_replaced"], "kr_rows_dropped": report["rows_dropped"],
+               "kr_source": "official_marcap"}
+    if not apply:
+        final = kr_db.preview_year(target, year, drop_dates=drops)
+        report["reconcile"] = reconcile(final, official, settle_from=settle_from)
+        logger.info("kr_official_planned", extra={"public_metrics": {
+            **metrics, "kr_final_rows": report["reconcile"]["final_rows"]}})
+        return report
+    if not rows.empty or drops or (open_year and through != report["official_through"]):
         # 쓸 행이 없어도 경계가 앞으로 갔으면 메타데이터만 갱신한다(같은 데이터를 다시 쓰는 비용).
-        target = rows if not rows.empty else stored.iloc[0:0]
-        kr_db.save_year(target, year, file_metadata=_metadata(kr_db.file_metadata(year), report))
+        kr_db.save_year(target, year, file_metadata=_metadata(kr_db.file_metadata(year), report),
+                        drop_dates=drops)
         report["written"] = True
+    if drops:
+        logger.warning("kr_closed_sessions_dropped", extra={"public_metrics": {
+            "kr_rows_dropped": report["rows_dropped"]}})
+    report["reconcile"] = reconcile(kr_db.load_year(year, strict=True), official, settle_from=settle_from)
     logger.info("kr_official_settled", extra={"public_metrics": {
-        "kr_official_through": report["official_through"].date().isoformat(),
-        "kr_dates": report["dates"], "kr_rows_added": report["rows_added"],
-        "kr_rows_replaced": report["rows_replaced"], "kr_source": "official_marcap"}})
+        **metrics, "kr_final_rows": report["reconcile"]["final_rows"]}})
     return report
 
 

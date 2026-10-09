@@ -415,27 +415,49 @@ def _recent_code_meta(prior, today, days: int = 7) -> dict:
     }
 
 
-def _settle_official_years(years, *, settle_from=None):
+def _official_apply_mode() -> bool:
+    import config
+    return str(config.KR_OFFICIAL_SETTLE_MODE).strip().lower() == "apply"
+
+
+def _settle_official_years(years, *, settle_from=None, apply=None, drop_dates=(), reports=None):
     """게시 직전 공식값 정정. 반환: (정정으로 다시 쓴 연도, 공식 원천 실패 오류 또는 None).
 
     공식 원천을 못 받거나 형식이 틀리면 그 연도는 건드리지 않고 오류를 돌려준다 —
     호출자는 잠정 데이터를 게시한 뒤 그 오류로 실패해 알림을 보낸다.
+    apply 를 주지 않으면 config.KR_OFFICIAL_SETTLE_MODE 를 따른다. 계획 모드는 쓰지 않는다.
+    자동 경로는 계획 모드의 오류를 로그로만 남긴다(_automatic_official_error).
     """
     import config
     from data import kr_collector, kr_official
     floor = settle_from or config.KR_OFFICIAL_SETTLE_FROM
+    apply = _official_apply_mode() if apply is None else apply
     settled, failure = [], None
     for year in sorted(set(years)):
+        year_drops = [d for d in drop_dates if str(d).startswith(f"{int(year)}-")]
         try:
-            report = kr_official.settle_year(int(year), settle_from=floor)
-        except kr_collector.KrCollectionError as error:
-            code = error.args[0] if len(error.args) == 1 else None
+            report = kr_official.settle_year(int(year), settle_from=floor, apply=apply,
+                                             drop_dates=year_drops)
+        except (kr_collector.KrCollectionError, kr_db_errors()) as error:
+            code = getattr(error, "code", None) or (error.args[0] if len(error.args) == 1 else None)
             logger.error("kr_official_failed", extra={"failure_code": code if isinstance(code, str) else None})
             failure = failure or error
             continue
+        if reports is not None:
+            reports.append(report)
         if report.get("written"):
             settled.append(int(year))
     return settled, failure
+
+
+def _automatic_official_error(error):
+    """자동 경로: 계획 모드(일괄 정정 승인 전)의 공식 원천 오류는 알림 없이 로그로만 둔다."""
+    return error if _official_apply_mode() else None
+
+
+def kr_db_errors():
+    from data import kr_db
+    return kr_db.KrCoverageError
 
 
 def _official_staleness(year):
@@ -452,12 +474,19 @@ def _official_staleness(year):
 def run_kr_settle(args):
     """공식값 정정만 실행한다(수동). --start-date 로 하한을 지정한다.
 
-    하한을 config.KR_OFFICIAL_SETTLE_FROM 보다 앞으로 내리는 것은 과거 이력의 일괄 정정이다 —
-    별도 승인 뒤, 예약 writer 와 겹치지 않는 시간에 실행한다.
+    과거 이력의 일괄 정정은 별도 승인 뒤, 예약 writer 와 겹치지 않는 시간에 실행한다.
+    --plan 은 운영 쓰기와 같은 경로로 계획만 하고(Drive 기준본은 읽기만) 쓰지 않는다.
+    --drop-closed-dates 는 휴장일 복사 행 삭제 — 날짜마다 kr_official.verify_closed_sessions 통과 필수.
+    --report 는 연도별 계획·대조 결과를 JSON 으로 남긴다(로컬 파일, 업로드 안 함).
     """
     if args.dry_run:
         logger.info("dry_run")
         return
+    plan = bool(getattr(args, "plan", False))
+    if plan and args.upload_drive:
+        logger.error("[KrSettle] --plan 과 --upload-drive 는 함께 쓸 수 없다")
+        sys.exit(1)
+    drops = [d.strip() for d in (getattr(args, "drop_closed_dates", None) or "").split(",") if d.strip()]
     import config
     import pandas as pd
     from datetime import date as _date
@@ -469,12 +498,29 @@ def run_kr_settle(args):
         logger.error("[KrSettle] 날짜 형식 오류 (YYYY-MM-DD)")
         sys.exit(1)
     years = list(range(max(floor.year, config.KR_OFFICIAL_MIN_YEAR), _date.today().year + 1))
-    states = kr_db.ensure_year_baselines(years, download=args.upload_drive)
+    try:
+        drops = [_date.fromisoformat(d).isoformat() for d in drops]
+    except ValueError:
+        logger.error("[KrSettle] --drop-closed-dates 날짜 형식 오류 (YYYY-MM-DD,…)")
+        sys.exit(1)
+    states = kr_db.ensure_year_baselines(years, download=args.upload_drive or plan)
     if "failed" in states.values():
         logger.error("[KrSettle] 기준 연도 파일 확인 실패 — 정정 없이 중단")
         sys.exit(1)
     targets = [year for year in years if states.get(year) == "ok"]
-    settled, official_error = _settle_official_years(targets, settle_from=floor.date().isoformat())
+    reports = []
+    settled, official_error = _settle_official_years(targets, settle_from=floor.date().isoformat(),
+                                                     apply=not plan, drop_dates=drops, reports=reports)
+    report_path = getattr(args, "report", None)
+    if report_path:
+        import json
+        from pathlib import Path
+        Path(report_path).write_text(json.dumps(reports, ensure_ascii=False, indent=2, default=str),
+                                     encoding="utf-8")
+    if plan:
+        if official_error is not None:
+            raise official_error
+        return
     if args.upload_drive and settled:
         failed_files = kr_db.upload_years(settled)
         if failed_files:
@@ -710,7 +756,8 @@ def run_kr_daily(args, today=None):
         if kr_db.ensure_year_baselines([prev_year], download=args.upload_drive).get(prev_year) == "ok":
             settle_years.insert(0, prev_year)
     settled, official_error = _settle_official_years(settle_years)
-    if official_error is None:
+    official_error = _automatic_official_error(official_error)
+    if official_error is None and _official_apply_mode():
         official_error = _official_staleness(current_year)
     updated = sorted(set(updated) | set(settled))
 
@@ -807,6 +854,7 @@ def run_kr_backfill(args):
     updated = kr_db.append_rows(df, ohlc_only=True)
     # 수동 백필(yfinance)이 공식 날짜를 덮었으면 게시 전에 공식값으로 되돌린다.
     settled, official_error = _settle_official_years(updated)
+    official_error = _automatic_official_error(official_error)
     updated = sorted(set(updated) | set(settled))
 
     if args.upload_drive and updated:
@@ -994,6 +1042,18 @@ def main():
     )
 
     # Drive & 기타
+    parser.add_argument(
+        "--plan", action="store_true",
+        help="kr-settle: 운영과 같은 경로로 계획·대조만 하고 쓰지 않음",
+    )
+    parser.add_argument(
+        "--drop-closed-dates", type=str, metavar="YYYY-MM-DD,...",
+        help="kr-settle: 검증된 휴장일 복사 행 삭제 대상 날짜(KRX 달력·직전일 복사·공식 부재 확인)",
+    )
+    parser.add_argument(
+        "--report", type=str, metavar="PATH",
+        help="kr-settle: 연도별 계획·대조 결과 JSON 저장 경로",
+    )
     parser.add_argument(
         "--upload-drive", action="store_true",
         help="수집 완료 후 Google Drive에 업로드",
