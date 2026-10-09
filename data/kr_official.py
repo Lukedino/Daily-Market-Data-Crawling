@@ -32,6 +32,7 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 import requests
 
 import config
@@ -43,6 +44,11 @@ logger = logging.getLogger(__name__)
 OFFICIAL_URL = ("https://raw.githubusercontent.com/FinanceData/marcap/"
                 "master/data/marcap-{year}.parquet")
 OFFICIAL_MAX_BYTES = 128 * 1024 * 1024
+OFFICIAL_MAX_ROWS = 2_000_000      # 한 해 약 70만 행 — 압축을 푼 뒤 커지는 파일은 읽기 전에 거절
+# 외부 원천이 저장본을 대량으로 바꾸려 하면 정정하지 않는다. 2026 일괄 정정 실측의 날짜별 최대
+# 비율은 3.4%(1월, 조정가→원가) — 그 몇 배인 20% 를 넘는 날이 하나라도 있으면 원천 이상으로 본다.
+CLOSE_SHIFT_PCT = 5.0
+MAX_SHIFTED_SHARE_PCT = 20.0
 STALE_AFTER_SESSIONS = 10          # 공식 확정이 우리 최신일보다 거래일 10개 넘게 뒤처지면 알린다
 SETTLEMENT_LOG_LIMIT = 30          # parquet 메타데이터에 남기는 최근 정정 기록 수
 
@@ -113,6 +119,8 @@ def fetch_official_year(year: int, *, request_get=None) -> pd.DataFrame:
     if not body:
         raise KrCollectionError("kr_official_unavailable")
     try:
+        if pq.ParquetFile(io.BytesIO(bytes(body))).metadata.num_rows > OFFICIAL_MAX_ROWS:
+            raise ValueError
         frame = pd.read_parquet(io.BytesIO(bytes(body)))
     except Exception:
         raise KrCollectionError("kr_official_invalid") from None
@@ -143,6 +151,8 @@ def validate_official(frame: pd.DataFrame, year: int) -> pd.DataFrame:
                 raise ValueError
             work[column] = values
         if work["Close"].isna().any():
+            raise ValueError
+        if (work["Volume"].gt(0) & work["High"].lt(work["Low"])).any():
             raise ValueError
         return _normalize_schema(work)
     except KrCollectionError:
@@ -185,6 +195,7 @@ def plan_settlement(stored: pd.DataFrame, official: pd.DataFrame, *, settle_from
     mine = mine[mine["Date"].isin(set(window["Date"]))]
 
     joined = window.merge(mine, on=["Code", "Date"], how="left", suffixes=("", "_s"))
+    _require_plausible(joined)
     target = pd.DataFrame({"Code": joined["Code"], "Date": joined["Date"]})
     for column in MEASURED:
         target[column] = joined[column].where(joined[column].notna(), joined[f"{column}_s"])
@@ -230,6 +241,26 @@ def plan_settlement(stored: pd.DataFrame, official: pd.DataFrame, *, settle_from
     report["rows_replaced"] = int((changed & ~added).sum())
     report["changed_dates"] = sorted({d.date().isoformat() for d in write["Date"]})
     return write, report
+
+
+def _require_plausible(joined: pd.DataFrame) -> None:
+    """공식 종가가 저장 종가와 5% 넘게 다른 행이 한 날짜의 20% 를 넘으면 정정하지 않는다.
+
+    정상적인 정정(잠정→공식, 조정가→원가)은 날짜마다 몇 %에 그친다. 그보다 훨씬 넓게 바뀌면
+    외부 원천의 오염·형식 변경을 의심해 저장본을 지키고 typed 실패로 드러낸다.
+    """
+    stored = pd.to_numeric(joined["Close_s"], errors="coerce")
+    official = pd.to_numeric(joined["Close"], errors="coerce")
+    both = stored.gt(0) & official.notna()
+    if not both.any():
+        return
+    shifted = ((official / stored - 1).abs() * 100 >= CLOSE_SHIFT_PCT) & both
+    per_day = shifted.groupby(joined["Date"]).sum() * 100 / both.groupby(joined["Date"]).sum()
+    worst = per_day[per_day > MAX_SHIFTED_SHARE_PCT]
+    if not worst.empty:
+        logger.error("kr_official_failed", extra={"public_metrics": {
+            "kr_date": worst.index[0].date().isoformat(), "kr_ratio_pct": float(worst.iloc[0])}})
+        raise KrCollectionError("kr_official_invalid")
 
 
 def _metadata(previous: dict, report: dict) -> dict:

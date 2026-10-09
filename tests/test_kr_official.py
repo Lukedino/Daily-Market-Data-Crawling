@@ -233,6 +233,15 @@ def test_fetch_failures_are_typed(response, code):
 
 
 @pytest.mark.real_official_fetch
+def test_oversized_official_file_is_rejected_before_it_is_loaded(monkeypatch):
+    monkeypatch.setattr(kr_official, "OFFICIAL_MAX_ROWS", len(CODES))
+    body = _parquet_bytes(pd.concat([_rows(d) for d in DAYS[:2]]))
+    with pytest.raises(kr_collector.KrCollectionError) as caught:
+        kr_official.fetch_official_year(YEAR, request_get=lambda url, **k: _Response(200, body))
+    assert caught.value.args[0] == "kr_official_invalid"
+
+
+@pytest.mark.real_official_fetch
 def test_network_exception_is_typed():
     def boom(url, **k):
         raise ConnectionError("synthetic")
@@ -249,6 +258,7 @@ def test_network_exception_is_typed():
     lambda f: f.assign(Code="12"),                                         # 잘못된 코드
     lambda f: f.assign(MarketId="XXX"),                                    # 알 수 없는 시장
     lambda f: f.iloc[0:0],                                                 # 빈 파일
+    lambda f: f.assign(High=900.0),                                        # 거래 있는데 고가 < 저가
 ])
 def test_malformed_official_frames_are_rejected(mutate):
     with pytest.raises(kr_collector.KrCollectionError) as caught:
@@ -456,3 +466,26 @@ def test_rows_whose_rank_cannot_be_computed_do_not_rewrite_forever(db):
     kr_official.settle_year(YEAR, settle_from=DAYS[0], official=official)
     report = kr_official.settle_year(YEAR, settle_from=DAYS[0], official=official)
     assert report["written"] is False and report["rows_replaced"] == 0
+
+
+# ── 외부 원천 이상 방어 ─────────────────────────────────────────────────────────
+
+def test_official_file_that_rewrites_most_of_a_day_is_refused_and_nothing_changes(db):
+    _provisional(db)
+    before = kr_db.local_path(YEAR).read_bytes()
+    official = _official(DAYS[:2])
+    official.loc[official.Date == DAYS[1], "Close"] = 5000.0       # 그날 전 종목 종가가 5배
+    with pytest.raises(kr_collector.KrCollectionError) as caught:
+        kr_official.settle_year(YEAR, settle_from=DAYS[0], official=official)
+    assert caught.value.args[0] == "kr_official_invalid"
+    assert kr_db.local_path(YEAR).read_bytes() == before
+
+
+def test_a_few_large_corrections_per_day_are_still_applied(db):
+    _provisional(db)
+    official = _official(DAYS[:2])
+    few = official.Code.isin(CODES[:15])                            # 하루 10% — 기업행동 수준
+    official.loc[few, "Close"] = 5000.0
+    kr_official.settle_year(YEAR, settle_from=DAYS[0], official=official)
+    saved = _saved()
+    assert saved[saved.Code.isin(CODES[:15]) & saved.Date.isin(DAYS[:2])].Close.eq(5000.0).all()
