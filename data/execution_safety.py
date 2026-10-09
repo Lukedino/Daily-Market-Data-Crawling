@@ -100,7 +100,7 @@ _ERROR_CODES = {
     "kr_baseline_empty_response", "kr_baseline_failed", "kr_baseline_filename_invalid",
     "kr_baseline_invalid", "kr_baseline_schema_invalid", "kr_baseline_state_mismatch",
     "kr_baseline_unavailable", "kr_collection_empty_unverified", "kr_coverage_gap",
-    "kr_coverage_insufficient", "kr_local_filename_invalid", "kr_official_invalid", "kr_closed_session_unverified",
+    "kr_coverage_insufficient", "kr_local_filename_invalid", "kr_official_invalid", "kr_closed_session_unverified", "kr_prelisting_row_unverified",
     "kr_official_stale", "kr_official_unavailable",
     "kr_snapshot_invalid", "kr_source_failed", "kr_source_too_large", "ohlc_baseline_absent",
     "ohlc_baseline_failed", "ohlc_baseline_incomplete", "ohlc_baseline_inconsistent",

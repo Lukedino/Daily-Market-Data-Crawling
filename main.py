@@ -420,7 +420,8 @@ def _official_apply_mode() -> bool:
     return str(config.KR_OFFICIAL_SETTLE_MODE).strip().lower() == "apply"
 
 
-def _settle_official_years(years, *, settle_from=None, apply=None, drop_dates=(), reports=None):
+def _settle_official_years(years, *, settle_from=None, apply=None, drop_dates=(), drop_keys=(),
+                           reports=None):
     """게시 직전 공식값 정정. 반환: (정정으로 다시 쓴 연도, 공식 원천 실패 오류 또는 None).
 
     공식 원천을 못 받거나 형식이 틀리면 그 연도는 건드리지 않고 오류를 돌려준다 —
@@ -435,9 +436,10 @@ def _settle_official_years(years, *, settle_from=None, apply=None, drop_dates=()
     settled, failure = [], None
     for year in sorted(set(years)):
         year_drops = [d for d in drop_dates if str(d).startswith(f"{int(year)}-")]
+        year_keys = [(c, d) for c, d in drop_keys if str(d).startswith(f"{int(year)}-")]
         try:
             report = kr_official.settle_year(int(year), settle_from=floor, apply=apply,
-                                             drop_dates=year_drops)
+                                             drop_dates=year_drops, drop_keys=year_keys)
         except (kr_collector.KrCollectionError, kr_db_errors()) as error:
             code = getattr(error, "code", None) or (error.args[0] if len(error.args) == 1 else None)
             logger.error("kr_official_failed", extra={"failure_code": code if isinstance(code, str) else None})
@@ -487,6 +489,7 @@ def run_kr_settle(args):
         logger.error("[KrSettle] --plan 과 --upload-drive 는 함께 쓸 수 없다")
         sys.exit(1)
     drops = [d.strip() for d in (getattr(args, "drop_closed_dates", None) or "").split(",") if d.strip()]
+    key_text = [k.strip() for k in (getattr(args, "drop_prelisting_keys", None) or "").split(",") if k.strip()]
     import config
     import pandas as pd
     from datetime import date as _date
@@ -500,8 +503,14 @@ def run_kr_settle(args):
     years = list(range(max(floor.year, config.KR_OFFICIAL_MIN_YEAR), _date.today().year + 1))
     try:
         drops = [_date.fromisoformat(d).isoformat() for d in drops]
+        keys = []
+        for item in key_text:
+            code, day = item.split(":")
+            if not (len(code) == 6 and code.isalnum()):
+                raise ValueError
+            keys.append((code, _date.fromisoformat(day).isoformat()))
     except ValueError:
-        logger.error("[KrSettle] --drop-closed-dates 날짜 형식 오류 (YYYY-MM-DD,…)")
+        logger.error("[KrSettle] --drop-closed-dates / --drop-prelisting-keys 형식 오류")
         sys.exit(1)
     states = kr_db.ensure_year_baselines(years, download=args.upload_drive or plan)
     if "failed" in states.values():
@@ -510,7 +519,8 @@ def run_kr_settle(args):
     targets = [year for year in years if states.get(year) == "ok"]
     reports = []
     settled, official_error = _settle_official_years(targets, settle_from=floor.date().isoformat(),
-                                                     apply=not plan, drop_dates=drops, reports=reports)
+                                                     apply=not plan, drop_dates=drops, drop_keys=keys,
+                                                     reports=reports)
     report_path = getattr(args, "report", None)
     if report_path:
         import json
@@ -1049,6 +1059,10 @@ def main():
     parser.add_argument(
         "--drop-closed-dates", type=str, metavar="YYYY-MM-DD,...",
         help="kr-settle: 검증된 휴장일 복사 행 삭제 대상 날짜(KRX 달력·직전일 복사·공식 부재 확인)",
+    )
+    parser.add_argument(
+        "--drop-prelisting-keys", type=str, metavar="CODE:YYYY-MM-DD,...",
+        help="kr-settle: 검증된 상장 전 무거래 행 삭제 대상 키(공식 첫 등장일 이후·거래량 0 확인)",
     )
     parser.add_argument(
         "--report", type=str, metavar="PATH",

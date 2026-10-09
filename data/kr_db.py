@@ -298,16 +298,21 @@ def _write_staged_frame(df: pd.DataFrame, year: int, destination: Path, metadata
 
 
 def _prepare_year(df: pd.DataFrame, year: int, *, ohlc_only=False, allow_gap=False,
-                  file_metadata: Optional[dict] = None, drop_dates=()):
+                  file_metadata: Optional[dict] = None, drop_dates=(), drop_keys=()):
     """저장될 연도 프레임과 메타데이터를 만든다(쓰지 않는다). save_year·preview_year 공용.
 
     drop_dates 는 병합 전에 기존 파일에서 그 날짜의 행을 뺀다 — 검증된 휴장일 복사 행
-    삭제(kr_official.verify_closed_sessions)만 이 경로를 쓴다.
+    삭제(kr_official.verify_closed_sessions)만 이 경로를 쓴다. drop_keys 는 (Code, Date) 쌍 —
+    검증된 상장 전 행 삭제(kr_official.verify_prelisting_keys)만 쓴다.
     """
     existing = load_year(year, strict=True)
     drops = {pd.Timestamp(d).normalize() for d in drop_dates}
     if drops and not existing.empty:
         existing = existing[~existing["Date"].isin(drops)].reset_index(drop=True)
+    keys = {(str(c), pd.Timestamp(d).normalize()) for c, d in drop_keys}
+    if keys and not existing.empty:
+        pairs = pd.Series(list(zip(existing["Code"].astype(str), existing["Date"])), index=existing.index)
+        existing = existing[~pairs.isin(keys)].reset_index(drop=True)
     metadata = {**_existing_metadata(year), **(file_metadata or {})}
     write_dates = set(pd.to_datetime(df["Date"], errors="coerce").dropna()) if "Date" in df else set()
     merged = _merge_year(df, existing, year, ohlc_only=ohlc_only)
@@ -324,7 +329,7 @@ def preview_year(df: pd.DataFrame, year: int, **kwargs) -> pd.DataFrame:
 
 
 def save_year(df: pd.DataFrame, year: int, *, ohlc_only=False, allow_gap=False,
-              file_metadata: Optional[dict] = None, drop_dates=()):
+              file_metadata: Optional[dict] = None, drop_dates=(), drop_keys=()):
     """
     연도별 Parquet 저장.
     기존 파일은 strict 읽기 후 병합. 검증된 임시 Parquet만 원자 교체한다.
@@ -335,7 +340,7 @@ def save_year(df: pd.DataFrame, year: int, *, ohlc_only=False, allow_gap=False,
     그대로 이어받는다 — 잠정 저장이 공식 확정 경계를 지우지 않게. 빈 df 에 file_metadata
     만 주면 데이터는 그대로 두고 메타데이터만 갱신한다. drop_dates 는 _prepare_year 참고.
     """
-    if df.empty and not file_metadata and not drop_dates:
+    if df.empty and not file_metadata and not drop_dates and not drop_keys:
         logger.warning(f"[KrDB] 빈 DataFrame → 저장 건너뜀: marcap-{year}")
         return
 
@@ -343,7 +348,8 @@ def save_year(df: pd.DataFrame, year: int, *, ohlc_only=False, allow_gap=False,
     path.parent.mkdir(parents=True, exist_ok=True)
 
     df, metadata = _prepare_year(df, year, ohlc_only=ohlc_only, allow_gap=allow_gap,
-                                 file_metadata=file_metadata, drop_dates=drop_dates)
+                                 file_metadata=file_metadata, drop_dates=drop_dates,
+                                 drop_keys=drop_keys)
     temporary = None
     try:
         with tempfile.NamedTemporaryFile(dir=path.parent, prefix=f".marcap-{year}-",

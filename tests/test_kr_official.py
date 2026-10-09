@@ -496,7 +496,7 @@ def test_a_few_large_corrections_per_day_are_still_applied(db):
 
 def _settle_args(**overrides):
     base = dict(dry_run=False, upload_drive=False, start_date=DAYS[0].date().isoformat(),
-                plan=False, drop_closed_dates=None, report=None)
+                plan=False, drop_closed_dates=None, drop_prelisting_keys=None, report=None)
     base.update(overrides)
     return SimpleNamespace(**base)
 
@@ -639,3 +639,62 @@ def test_reconcile_counts_missing_extra_and_duplicate_keys():
     rec = kr_official.reconcile(final, official, settle_from=DAYS[0])
     assert rec["missing_rows"] == 1 and rec["extra_rows"] == 1 and rec["duplicate_keys"] == 1
     assert rec["extra_dates"] == [] and rec["sorted_by_date_code"] is False
+
+
+# ── 상장 전 무거래 행: 명시한 키만 검증 후 삭제 (교보20호스팩 03-31·04-01 사례) ─────────────
+
+SPAC = "0132G0"
+
+
+def _with_prelisting_rows(db, monkeypatch, *, volume=0):
+    """SPAC 이 DAYS[0]·DAYS[1] 에 무거래로 저장돼 있지만 공식엔 DAYS[2] 부터(상장일) 있다."""
+    frames = [_rows(d) for d in DAYS[:4]]
+    frames += [_rows(d, codes=[SPAC], close=2000.0, volume=volume) for d in DAYS[:4]]
+    kr_db.local_path(YEAR).unlink(missing_ok=True)
+    db.save_year(pd.concat(frames, ignore_index=True), YEAR)
+    official = pd.concat([_rows(d) for d in DAYS[:4]] + [_rows(d, codes=[SPAC], close=2000.0) for d in DAYS[2:4]],
+                         ignore_index=True)
+    monkeypatch.setattr(kr_official, "fetch_official_year",
+                        lambda year, **k: kr_official.validate_official(official, YEAR))
+    return ",".join(f"{SPAC}:{d.date().isoformat()}" for d in DAYS[:2])
+
+
+def test_verified_prelisting_keys_are_dropped_and_nothing_else(daily, db, monkeypatch, tmp_path):
+    keys = _with_prelisting_rows(db, monkeypatch)
+    report_path = tmp_path / "r.json"
+    kr_main.run_kr_settle(_settle_args(drop_prelisting_keys=keys, report=str(report_path)))
+    saved = _saved()
+    spac = saved[saved.Code == SPAC]
+    assert sorted(spac.Date) == list(DAYS[2:4]), "상장일 이후 행은 그대로"
+    assert len(saved) == 4 * len(CODES) + 2
+    [report] = _read_report(report_path)
+    assert report["rows_dropped"] == 2 and report["reconcile"]["extra_rows"] == 0
+    assert [e["official_first_date"] for e in report["prelisting_keys"]] == [DAYS[2].date().isoformat()] * 2
+
+
+def test_prelisting_keys_without_an_explicit_list_are_kept(daily, db, monkeypatch, tmp_path):
+    _with_prelisting_rows(db, monkeypatch)
+    report_path = tmp_path / "r.json"
+    kr_main.run_kr_settle(_settle_args(report=str(report_path)))
+    [report] = _read_report(report_path)
+    assert report["reconcile"]["extra_rows"] == 2, "공식에 없다는 이유만으로 지우지 않는다"
+    assert len(_saved()[lambda f: f.Code == SPAC]) == 4
+
+
+@pytest.mark.parametrize("case", ["traded", "listed_already", "unknown_key", "official_missing_date"])
+def test_unverified_prelisting_key_is_never_dropped(daily, db, monkeypatch, case):
+    keys = _with_prelisting_rows(db, monkeypatch, volume=5 if case == "traded" else 0)
+    if case == "listed_already":
+        keys = f"{SPAC}:{DAYS[2].date().isoformat()}"
+    if case == "unknown_key":
+        keys = f"999999:{DAYS[0].date().isoformat()}"
+    if case == "official_missing_date":
+        official = pd.concat([_rows(d) for d in DAYS[1:4]] + [_rows(d, codes=[SPAC], close=2000.0) for d in DAYS[2:4]],
+                             ignore_index=True)
+        monkeypatch.setattr(kr_official, "fetch_official_year",
+                            lambda year, **k: kr_official.validate_official(official, YEAR))
+    before = kr_db.local_path(YEAR).read_bytes()
+    with pytest.raises(kr_collector.KrCollectionError) as caught:
+        kr_main.run_kr_settle(_settle_args(drop_prelisting_keys=keys))
+    assert caught.value.args[0] == "kr_prelisting_row_unverified"
+    assert kr_db.local_path(YEAR).read_bytes() == before

@@ -187,6 +187,7 @@ Market | MarketId | Rank | Date
 - **자동 정정 모드 `KR_OFFICIAL_SETTLE_MODE`(기본 `plan`)**: kr-daily·kr-backfill 은 plan 이면 받기·검증·계획·종목 범위 게이트까지 하고 **쓰지 않는다**(`kr_official_planned` 로그에 수치만, 공식 원천 장애도 알림 없이 로그만). 2026 일괄 정정이 승인·실행된 뒤 `apply` 로 바꾼다 — 하한 2026-01-01 인 채 apply 면 첫 kr-daily 가 30만 행을 바꾼다. 알 수 없는 값은 plan
 - **`--plan`**: `settle_year(apply=False)` 가 운영 쓰기와 같은 함수·같은 방어(대량 변경 거부)·같은 게이트(`kr_db.preview_year` → `_prepare_year`)를 거친 뒤 쓰지 않는다. `--report` JSON 에 날짜·종목 집합 대조(`reconcile`: 누락·초과 날짜/행, 중복 키, 정렬, OHLCV 불일치, 최종 행 수)
 - **휴장일 복사 행 삭제 `--drop-closed-dates`**(수동 kr-settle 만): 날짜마다 ① KRX 달력(`krx_calendar`, 수집기와 같은 출처)이 휴장 ② 공식 파일이 그 날짜 이후까지 게시됐는데 그날이 없음(게시 지연과 구분) ③ 직전 저장 거래일과 종가 99% 이상 일치 — 셋 다 만족해야 하고 하나라도 어긋나면 `kr_closed_session_unverified` 로 아무것도 안 쓴다. 정정과 한 번의 원자 쓰기로 처리하고 정정 이력 메타데이터에 `rows_dropped`·`dropped_dates` 를 남긴다. marcap 에 없다는 이유만으로는 지우지 않는다
+- **상장 전 무거래 행 삭제 `--drop-prelisting-keys CODE:YYYY-MM-DD,...`**(수동 kr-settle 만, 명시한 키만): 키마다 저장본 1행·거래량 0, 공식 파일이 그 날짜를 게시했는데 그 종목은 없음, 그 종목의 공식 첫 등장일이 그 날짜 이후 — 셋 다 만족해야 하고 아니면 `kr_prelisting_row_unverified`. 상장일 근거(KIND 상장법인 목록)는 실행 보고서에 둔다. "공식에 없는 행은 전부 삭제" 같은 일반 규칙은 두지 않는다(2026-10-10 사용자 지시)
 - **멱등**: 같은 공식 파일로 다시 돌면 추가 0·교체 0. 정정된 날짜는 이후 잠정 수집이 덮어쓰지 않는다(kr-daily 는 오늘만 쓰고, 정정은 그 뒤에 돈다)
 - 상태·이력은 parquet 스키마 메타데이터(`kr_official_through`·`kr_official_source`·`kr_settlement_log` 최근 30건) — SA 가 Drive 새 파일을 못 만들어 별도 메타 파일을 두지 않는다
 

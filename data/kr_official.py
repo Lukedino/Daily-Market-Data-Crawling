@@ -280,7 +280,8 @@ def _metadata(previous: dict, report: dict) -> dict:
             "first_date": report["changed_dates"][0] if report["changed_dates"] else None,
             "last_date": report["changed_dates"][-1] if report["changed_dates"] else None,
             "fields": {k: v for k, v in report["fields"].items() if v},
-            **({"rows_dropped": report["rows_dropped"], "dropped_dates": report["dropped_dates"]}
+            **({"rows_dropped": report["rows_dropped"], "dropped_dates": report["dropped_dates"],
+                "dropped_keys": report.get("dropped_keys", [])}
                if report.get("rows_dropped") else {}),
         })
     return {META_THROUGH: report["official_through"].date().isoformat().encode(),
@@ -335,6 +336,29 @@ def verify_closed_sessions(stored: pd.DataFrame, official: pd.DataFrame, dates) 
     return evidence
 
 
+def verify_prelisting_keys(stored: pd.DataFrame, official: pd.DataFrame, keys) -> list:
+    """명시한 (종목, 날짜) 행이 '상장 전에 들어간 무거래 행' 인지 확인한다(일반 규칙 아님).
+
+    모두 만족해야 한다(하나라도 어긋나면 kr_prelisting_row_unverified, 아무것도 안 씀):
+      - 저장본에 그 키가 정확히 1행 있고 거래량이 0(또는 비어 있음)
+      - 공식 파일이 그 날짜를 게시했는데(다른 종목 행 있음) 그 종목 행은 없음
+      - 그 종목이 공식 파일에 그 날짜 **이후** 처음 나타남(상장일 이후만 존재)
+    상장일 자체의 근거(KIND 상장법인 목록 등)는 실행 보고서에 남긴다. 반환: 키별 근거.
+    """
+    evidence = []
+    for code, day in sorted({(str(c), pd.Timestamp(d).normalize()) for c, d in keys}):
+        rows = stored[(stored["Code"].astype(str) == code) & (stored["Date"] == day)]
+        listed = official.loc[official["Code"].astype(str) == code, "Date"]
+        volume = pd.to_numeric(rows["Volume"], errors="coerce") if len(rows) == 1 else None
+        if (len(rows) != 1 or not (volume.isna() | volume.eq(0)).all()
+                or not official["Date"].eq(day).any() or listed.empty or listed.min() <= day):
+            raise KrCollectionError("kr_prelisting_row_unverified")
+        evidence.append({"code": code, "date": day.date().isoformat(),
+                         "official_first_date": listed.min().date().isoformat(),
+                         "stored_volume": None if volume.isna().all() else float(volume.iloc[0])})
+    return evidence
+
+
 def reconcile(final: pd.DataFrame, official: pd.DataFrame, *, settle_from) -> dict:
     """정정 결과와 공식 파일의 날짜·종목 집합까지 대조한다(공통 행 OHLCV 비교만으로 끝내지 않는다).
 
@@ -364,7 +388,7 @@ def reconcile(final: pd.DataFrame, official: pd.DataFrame, *, settle_from) -> di
 
 
 def settle_year(year: int, *, settle_from, official: Optional[pd.DataFrame] = None,
-                fetch=None, apply: bool = True, drop_dates=()) -> dict:
+                fetch=None, apply: bool = True, drop_dates=(), drop_keys=()) -> dict:
     """저장본 한 연도를 공식값으로 정정한다. 공식 파일이 아직 없으면 아무것도 쓰지 않는다.
 
     `config.KR_OFFICIAL_MIN_YEAR` 이전 연도는 건드리지 않는다. 마감 연도(올해가 아닌 해)는
@@ -372,6 +396,7 @@ def settle_year(year: int, *, settle_from, official: Optional[pd.DataFrame] = No
     apply=False 는 계획만 한다: 받기·검증·휴장일 확인·정정 계획·대량 변경 방어·종목 범위
     게이트를 운영 쓰기와 **같은 경로**(kr_db.preview_year)로 거친 뒤 파일은 쓰지 않는다.
     drop_dates 는 verify_closed_sessions 를 통과한 날짜만, 정정과 **한 번의 원자 쓰기**로 지운다.
+    drop_keys 는 verify_prelisting_keys 를 통과한 (종목, 날짜) 만 같은 쓰기로 지운다.
     """
     if year < config.KR_OFFICIAL_MIN_YEAR:
         return {"year": year, "absent": False, "written": False, "skipped": "closed_year"}
@@ -385,12 +410,17 @@ def settle_year(year: int, *, settle_from, official: Optional[pd.DataFrame] = No
     stored = kr_db.load_year(year, strict=True)
     drops = sorted({pd.Timestamp(d).normalize() for d in drop_dates})
     evidence = verify_closed_sessions(stored, official, drops) if drops else []
-    dropped = stored["Date"].isin(drops)
+    keys = sorted({(str(c), pd.Timestamp(d).normalize()) for c, d in drop_keys})
+    key_evidence = verify_prelisting_keys(stored, official, keys) if keys else []
+    pairs = pd.Series(list(zip(stored["Code"].astype(str), stored["Date"])), index=stored.index)
+    dropped = stored["Date"].isin(drops) | pairs.isin(set(keys))
     rows, report = plan_settlement(stored[~dropped], official, settle_from=settle_from)
     report.update({"year": year, "absent": False, "written": False, "applied": apply,
                    "rows_dropped": int(dropped.sum()),
                    "dropped_dates": [d.date().isoformat() for d in drops],
-                   "closed_sessions": evidence, "rows_before": int(len(stored))})
+                   "closed_sessions": evidence, "prelisting_keys": key_evidence,
+                   "dropped_keys": [f"{c}:{d.date().isoformat()}" for c, d in keys],
+                   "rows_before": int(len(stored))})
     if report["official_through"] is None:
         return report
     through = official_through(year)
@@ -401,17 +431,17 @@ def settle_year(year: int, *, settle_from, official: Optional[pd.DataFrame] = No
                "kr_rows_replaced": report["rows_replaced"], "kr_rows_dropped": report["rows_dropped"],
                "kr_source": "official_marcap"}
     if not apply:
-        final = kr_db.preview_year(target, year, drop_dates=drops)
+        final = kr_db.preview_year(target, year, drop_dates=drops, drop_keys=keys)
         report["reconcile"] = reconcile(final, official, settle_from=settle_from)
         logger.info("kr_official_planned", extra={"public_metrics": {
             **metrics, "kr_final_rows": report["reconcile"]["final_rows"]}})
         return report
-    if not rows.empty or drops or (open_year and through != report["official_through"]):
+    if not rows.empty or drops or keys or (open_year and through != report["official_through"]):
         # 쓸 행이 없어도 경계가 앞으로 갔으면 메타데이터만 갱신한다(같은 데이터를 다시 쓰는 비용).
         kr_db.save_year(target, year, file_metadata=_metadata(kr_db.file_metadata(year), report),
-                        drop_dates=drops)
+                        drop_dates=drops, drop_keys=keys)
         report["written"] = True
-    if drops:
+    if drops or keys:
         logger.warning("kr_closed_sessions_dropped", extra={"public_metrics": {
             "kr_rows_dropped": report["rows_dropped"]}})
     report["reconcile"] = reconcile(kr_db.load_year(year, strict=True), official, settle_from=settle_from)
