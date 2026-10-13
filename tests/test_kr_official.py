@@ -506,10 +506,10 @@ def _read_report(path):
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
-def test_config_defaults_cover_2026_but_only_plan_until_approved():
+def test_config_defaults_cover_2026_and_apply_after_the_bulk_settlement():
     source = Path(config.__file__).read_text(encoding="utf-8")
     assert 'os.environ.get("KR_OFFICIAL_SETTLE_FROM", "2026-01-01")' in source
-    assert 'os.environ.get("KR_OFFICIAL_SETTLE_MODE", "plan")' in source
+    assert 'os.environ.get("KR_OFFICIAL_SETTLE_MODE", "apply")' in source
 
 
 @pytest.mark.parametrize("mode", ["plan", "", "APPLY-later", None])

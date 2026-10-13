@@ -31,7 +31,8 @@ KR_OFFICIAL_SETTLE_FROM = os.environ.get("KR_OFFICIAL_SETTLE_FROM", "2026-01-01"
 # 않는다(로그에 계획 수치만). "apply" = 실제 정정. 2026 일괄 정정이 승인·실행되기 전에는
 # plan 이어야 한다 — 하한 2026-01-01 그대로 apply 면 첫 kr-daily 가 30만 행을 바꾼다.
 # 알 수 없는 값은 plan 으로 본다. 수동 --mode kr-settle 은 이 값과 무관하다(--plan 으로 계획만).
-KR_OFFICIAL_SETTLE_MODE = os.environ.get("KR_OFFICIAL_SETTLE_MODE", "plan")
+# 2026-10-13 10:01 KST 일괄 정정·사후 검증 완료(같은 파일 ID 갱신, 541,187행) → apply 로 전환.
+KR_OFFICIAL_SETTLE_MODE = os.environ.get("KR_OFFICIAL_SETTLE_MODE", "apply")
 # 이 연도 이전(마감 연도)은 어떤 경로로도 정정하지 않는다 — 2025년은 공식값과 696,524행
 # 전부 일치했고, 하류 ML 의 연구 해시가 마감 연도 데이터를 쓴다.
 KR_OFFICIAL_MIN_YEAR = 2026
