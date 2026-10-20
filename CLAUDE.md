@@ -60,7 +60,7 @@ US 주식/ETF, 크립토, KR(한국) 시장 OHLC + 재무데이터를 수집해 
 
 | 파일 | 스케줄 | 역할 |
 |------|--------|------|
-| `kr-daily.yml` | 평일 UTC 07:30 (KST 16:30) | KR 일별 스냅샷 수집 + 자동 갭 보정 |
+| `kr-daily.yml` | 외부 디스패처 → workflow_dispatch, 평일 UTC 14:00 (KST 23:00) | KR 일별 스냅샷 수집 + 자동 갭 보정 (2026-10-21 cron 16:30 KST 에서 이관 — FDR 당일 CSV 최종 갱신 ~22:30 KST 뒤, Mr.Market 크롤러 23:30 KST 앞) |
 | `kr-backfill.yml` | workflow_dispatch | KR 누락 구간 과거 수집 |
 | `ohlc-daily.yml` | 외부 디스패처 → workflow_dispatch, 월~토 UTC 22:23 (KST 다음 날 07:23) | US/Crypto OHLC 일별 수집 |
 | `ohlc-daily.yml` | 외부 디스패처 → workflow_dispatch, 매일 UTC 00:41 (KST 09:41) | Crypto 전용 — 전일 확정 캔들 수집 |

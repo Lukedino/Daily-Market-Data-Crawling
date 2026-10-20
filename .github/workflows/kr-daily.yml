@@ -1,9 +1,10 @@
 name: "KR Daily — 한국 시장 일별 스냅샷"
 
 on:
-  schedule:
-    # 매일 07:30 UTC (16:30 KST) — 장마감(15:30) 후 1시간
-    - cron: '30 7 * * 1-5'
+  # 예약 실행은 Personal Assistant apps/orchestrator/config/gha-schedules.json(kr-daily)이 workflow_dispatch 로
+  # 평일 14:00 UTC(23:00 KST)에 깨운다 — FDR 캐시가 당일 CSV 를 22:30 KST 무렵까지 다시 쓰고(10-13·15·16 실측),
+  # GitHub 예약 큐는 16:30 KST cron 을 5~9시간 늦게 돌렸다. Mr.Market crawler-kr(23:30 KST)이 이 산출물을 읽는다.
+  # cron 을 되살리려면 그쪽 항목을 enabled:false 로 바꾼 뒤 여기에 schedule: 블록을 복원한다.
   workflow_dispatch:
     inputs:
       dry_run:
