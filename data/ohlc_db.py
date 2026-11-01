@@ -934,12 +934,18 @@ def sector_meta_path(market: str) -> Path:
     return local_dir(market) / f"{market}_sector_meta.parquet"
 
 
-_SECTOR_COLUMNS = ["Ticker", "Market", "Sector", "Industry", "updated_at"]
+_SECTOR_COLUMNS = ["Ticker", "Market", "Sector", "Industry", "updated_at", "QuoteType"]
+# QuoteType(2026-11-01 추가) 이 없는 옛 파일도 기준본으로 읽는다 — 빈 값으로 채운다.
+_SECTOR_REQUIRED = ["Ticker", "Market", "Sector", "Industry", "updated_at"]
+# 실패한 관측에서 이전 값으로 되돌릴 수 있는 필드
+_SECTOR_OBSERVED_FIELDS = {"Sector", "Industry", "QuoteType"}
 
 
 def _validate_sector_frame(df: pd.DataFrame) -> pd.DataFrame:
-    if df.columns.has_duplicates or not set(_SECTOR_COLUMNS).issubset(df.columns):
+    if df.columns.has_duplicates or not set(_SECTOR_REQUIRED).issubset(df.columns):
         raise DriveSyncError("sector_schema_invalid")
+    if "QuoteType" not in df.columns:
+        df = df.assign(QuoteType="")
     result = df[_SECTOR_COLUMNS].copy()
     result.attrs = {}
     if result.empty:
@@ -948,7 +954,7 @@ def _validate_sector_frame(df: pd.DataFrame) -> pd.DataFrame:
             or result["Ticker"].str.strip().str.upper().duplicated().any()
             or result["Market"].map(lambda value: not isinstance(value, str) or not value.strip()).any()):
         raise DriveSyncError("sector_keys_invalid")
-    for column in ["Sector", "Industry"]:
+    for column in ["Sector", "Industry", "QuoteType"]:
         if result[column].map(lambda value: not isinstance(value, str) and not pd.isna(value)).any():
             raise DriveSyncError("sector_field_invalid")
         result[column] = result[column].fillna("")
@@ -980,7 +986,7 @@ def save_sector_meta(df: pd.DataFrame, market: str, allow_shrink: bool = False):
         raise DriveSyncError("sector_collection_empty")
     prior = load_sector_meta(market)
     failed_fields = df.attrs.get("sector_failed_fields", {})
-    candidate = df[_SECTOR_COLUMNS].copy()
+    candidate = (df if "QuoteType" in df.columns else df.assign(QuoteType=""))[_SECTOR_COLUMNS].copy()
     old = prior.set_index("Ticker")
     unresolved = []   # 기준본에 없어 되돌릴 값이 없는 신규 종목
     for index, row in candidate.iterrows():
@@ -991,13 +997,13 @@ def save_sector_meta(df: pd.DataFrame, market: str, allow_shrink: bool = False):
                 # 나쁜 심볼 하나가 그 주 산출물 전체(US 1,061행)를 버리게 했다.
                 # 그 행의 해당 필드만 빈 값으로 두고 나머지는 게시한다.
                 for field in failed:
-                    if field not in {"Sector", "Industry"}:
+                    if field not in _SECTOR_OBSERVED_FIELDS:
                         raise DriveSyncError("sector_observation_invalid")
                     candidate.at[index, field] = ""
                 unresolved.append(row["Ticker"])
                 continue
             for field in failed:
-                if field not in {"Sector", "Industry"}:
+                if field not in _SECTOR_OBSERVED_FIELDS:
                     raise DriveSyncError("sector_observation_invalid")
                 candidate.at[index, field] = old.at[row["Ticker"], field]
             # One row timestamp must not certify fields that were not observed.

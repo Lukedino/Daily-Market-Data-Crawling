@@ -136,7 +136,7 @@ def test_actual_info_failure_preserves_existing(monkeypatch, value):
     prior()
     setup_info(monkeypatch, {"AAPL": value})
     fresh = collector.collect_sector_meta("us")
-    assert fresh.attrs["sector_failed_fields"] == {"AAPL": ["Sector", "Industry"]}
+    assert fresh.attrs["sector_failed_fields"] == {"AAPL": ["Sector", "Industry", "QuoteType"]}  # 신원 미확인 — 종류도 관측 아님
     db.save_sector_meta(fresh, "us")
     observed = db.load_sector_meta("us").iloc[0]
     assert observed["Sector"] == "Technology" and observed["Industry"] == "Software"

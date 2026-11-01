@@ -9,7 +9,7 @@ data/ohlc_collector.py — US 주식/ETF 및 크립토 OHLC 수집 (yfinance)
 
 출력 스키마 (OHLC):   Ticker | Date | Open | High | Low | Close | Volume |
                      Amount | ChangesRatio | MarketCap | Dividends | Splits
-출력 스키마 (메타):   Ticker | Market | Sector | Industry | updated_at
+출력 스키마 (메타):   Ticker | Market | Sector | Industry | updated_at | QuoteType
   - Market: S&P500 / NASDAQ100 / DOW30 / ETF / US / Crypto
   - Sector/Industry: Yahoo Finance .info 기반 (주 1회 수집)
 """
@@ -1776,7 +1776,7 @@ def collect_sector_meta(market: str) -> pd.DataFrame:
       - 유니버스 전체 → Market="Crypto", Sector/Industry 빈 값
 
     Returns:
-      DataFrame: Ticker | Market | Sector | Industry | updated_at
+      DataFrame: Ticker | Market | Sector | Industry | updated_at | QuoteType
     """
     try:
         import yfinance as yf
@@ -1790,7 +1790,8 @@ def collect_sector_meta(market: str) -> pd.DataFrame:
     if market == "crypto":
         tickers = load_tickers("crypto")
         rows = [
-            {"Ticker": t, "Market": "Crypto", "Sector": "", "Industry": "", "updated_at": updated_at}
+            {"Ticker": t, "Market": "Crypto", "Sector": "", "Industry": "", "updated_at": updated_at,
+             "QuoteType": ""}
             for t in tickers
         ]
         df = pd.DataFrame(rows)
@@ -1822,7 +1823,7 @@ def collect_sector_meta(market: str) -> pd.DataFrame:
     logger.info(f"[SectorMeta] US Sector/Industry 수집 시작: {len(all_tickers)}종목")
 
     for i, t in enumerate(ticker_iter, 1):
-        sector, industry = "", ""
+        sector, industry, quote_type_out = "", "", ""
         try:
             info = yf.Ticker(t).info
             # 폐기·오류 종목(HTTP 404)에 yfinance 는 예외도 빈 dict 도 아닌
@@ -1834,6 +1835,7 @@ def collect_sector_meta(market: str) -> pd.DataFrame:
             fields = {}
             quote_type = info.get("quoteType")
             sectorless_ok = isinstance(quote_type, str) and quote_type.upper() in _SECTORLESS_QUOTE_TYPES
+            quote_type_out = quote_type.strip().upper() if isinstance(quote_type, str) else ""
             for source, target in [("sector", "Sector"), ("industry", "Industry")]:
                 value = info.get(source, "")
                 if value is None:
@@ -1850,7 +1852,7 @@ def collect_sector_meta(market: str) -> pd.DataFrame:
             if failed:
                 failed_fields[t] = failed
         except Exception:
-            failed_fields[t] = ["Sector", "Industry"]
+            failed_fields[t] = ["Sector", "Industry", "QuoteType"]
             logger.debug("[SectorMeta] info_unverified")
 
         rows.append({
@@ -1859,6 +1861,7 @@ def collect_sector_meta(market: str) -> pd.DataFrame:
             "Sector":     sector,
             "Industry":   industry,
             "updated_at": updated_at,
+            "QuoteType":  quote_type_out,
         })
 
         if i % 100 == 0:
