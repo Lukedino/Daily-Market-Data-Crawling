@@ -48,7 +48,36 @@ def test_one_source_date_response_selects_the_same_csv_without_today_query():
     assert kc.snapshot_source_date(frame) == date(2026, 9, 18)
     assert len(calls) == 2 and calls[1][0].endswith("/2026-09-18.csv")
     assert all(call[1]["allow_redirects"] is False for call in calls)
+    assert all(call[0].startswith("https://") for call in calls)  # 리다이렉트를 안 따르므로 http 면 301 로 실패
     assert all(response.closed for response in responses)
+
+
+def test_redirect_has_its_own_failure_code():
+    # 2026-10-29 KRX 가 http 를 301 로 옮겼는데 kr_source_failed 로만 보여 일시 장애와 구분되지 않았다.
+    get, calls, responses = source()
+    responses[0].status_code = 301
+    with pytest.raises(kc.KrCollectionError) as caught:
+        kc.read_krx_snapshot(request_get=get)
+    assert caught.value.code == "kr_source_redirected"
+
+
+def test_past_session_reads_that_days_file_without_date_query():
+    get, calls, responses = source()
+    def csv_only(url, **kwargs):
+        calls.append((url, kwargs))
+        return responses[1]
+    frame = kc.read_krx_session(date(2026, 9, 18), request_get=csv_only)
+    assert kc.snapshot_source_date(frame) == date(2026, 9, 18)
+    assert len(calls) == 1 and calls[0][0].endswith("/2026-09-18.csv")
+
+
+def test_closed_day_file_is_not_a_session():
+    closed = snapshot()
+    closed["Marcap"] = float("nan")
+    get, calls, responses = source(closed)
+    with pytest.raises(kc.KrCollectionError) as caught:
+        kc.read_krx_session(date(2026, 9, 18), request_get=lambda url, **kwargs: responses[1])
+    assert caught.value.code == "kr_snapshot_invalid"
 
 
 @pytest.mark.parametrize("day", ["20260999", "2026-09-18", None, 20260918, ""])

@@ -560,12 +560,37 @@ def _require_daily_coverage(df, reference, *, source):
     logger.info("kr_coverage_checked", extra={"public_metrics": metrics})
 
 
+def _fill_gap_from_source(days, coverage_reference, *, upload):
+    """놓친 세션을 원천 캐시의 그날 최종본으로 채우고 못 채운 날부터 돌려준다.
+
+    yfinance 갭 백필은 저장본 대조에서 ~90% 탈락해 종목 범위 게이트를 넘지 못한다
+    (2026-10-01 수동 복구). 지난날 파일은 원천 장애가 끝나면 받을 수 있으므로 먼저
+    시도한다. 오늘 수집이 또 실패해도 채운 날은 남도록 바로 올린다.
+    """
+    from data import kr_collector, kr_db
+    for index, day in enumerate(days):
+        try:
+            frame = kr_collector.collect_session(day)
+            kr_collector.validate_price_basis(frame)
+            _require_daily_coverage(frame, coverage_reference, source="fdr_snapshot")
+        except kr_collector.KrCollectionError as error:
+            logger.warning("kr_source_fallback_attempted", extra={"failure_code": error.code})
+            return days[index:]
+        updated = kr_db.append_rows(frame)
+        failed_files = kr_db.upload_years(updated) if upload else []
+        if failed_files:
+            logger.error(f"[KrDaily] Drive 업로드 실패: {failed_files}")
+            sys.exit(1)
+        logger.info(f"[KrDaily] 놓친 세션 복구: {day}")
+    return []
+
+
 def run_kr_daily(args, today=None):
     """
     KR daily 수집 플로우:
     0. KRX 휴장일이면 아무것도 하지 않는다(exit 0) — 2026-09-25(추석) 실패의 원인
     1. Drive에서 현재 연도 parquet + status 다운로드
-    2. last_date 확인 → 어제까지 **거래일** 갭이 있으면 yfinance backfill 자동 수행
+    2. last_date 확인 → 어제까지 **거래일** 갭이 있으면 원천 캐시로 복구, 못 채운 날은 yfinance backfill
     3. 같은 원천 일자의 FDR 스냅샷 수집 (실제 원천 오류는 즉시 보류)
     4. 저장 + Drive 업로드
 
@@ -639,12 +664,18 @@ def run_kr_daily(args, today=None):
         # 판정해 추석 다음 날 09-24 를 갭으로 세었다(위 0 단계 주석). 달력을 모르는
         # 해는 평일을 거래일로 본다 — 기존 동작.
         bdays = krx_calendar.trading_days(gap_start, yesterday)
+        missed = len(bdays)
+        bdays = _fill_gap_from_source(bdays, coverage_reference, upload=args.upload_drive)
+        if len(bdays) < missed:
+            # 긴 장애 뒤 오늘 원천도 실패하면 야후 폴백은 복구분을 기준으로 삼아야 한다.
+            reference = kr_db.load_year(current_year, strict=True)
+            fallback_meta = _recent_code_meta(reference, today)
         if len(bdays) > 0:
             logger.info(
-                f"[KrDaily] 갭 감지: {gap_start} ~ {yesterday} "
+                f"[KrDaily] 갭 감지: {bdays[0]} ~ {yesterday} "
                 f"({len(bdays)} 거래일) → yfinance backfill 시작"
             )
-            gap_df = kr_collector.collect_backfill(str(gap_start), str(yesterday),
+            gap_df = kr_collector.collect_backfill(str(bdays[0]), str(yesterday),
                                                    fallback_meta=fallback_meta,
                                                    reference=reference)
             if not gap_df.empty:
@@ -653,7 +684,7 @@ def run_kr_daily(args, today=None):
                 logger.info(f"[KrDaily] 갭 보완 완료: {gap_updated}년 파일 업데이트")
             else:
                 logger.warning("[KrDaily] 갭 backfill 수집 결과 없음")
-        else:
+        elif not missed:
             logger.info(f"[KrDaily] 갭 없음 (주말만 존재: {gap_start} ~ {yesterday})")
     else:
         logger.info(f"[KrDaily] 갭 없음 — last_date: {last_date}")

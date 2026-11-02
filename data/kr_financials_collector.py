@@ -240,7 +240,8 @@ def _fetch_report(dart, code: str, year: int, reprt_code: str):
 
 def _load_verified_universe(top_n, snap, *, upload, uploader=None):
     """연도 기준본 전체 확인 → 유효 시총 날짜 → 동일 원천 최신 날짜 대조."""
-    from data import financials_db, kr_db
+    from datetime import timedelta
+    from data import financials_db, kr_db, krx_calendar
     from data.kr_collector import read_krx_snapshot, snapshot_source_date
 
     years = [snap.year - 1, snap.year]
@@ -264,7 +265,12 @@ def _load_verified_universe(top_n, snap, *, upload, uploader=None):
         # 평일 낮 실행은 늘 하루 앞선 스냅숏을 보므로, 더 새로우면 같은 원천의 그 스냅숏으로 고른다
         # (2026-10-01 universe_unverified). 오래된 기준본으로 고르지 않는다는 원칙은 그대로다.
         if observed_date > source_date:
-            universe = build_universe(observed, top_n)
+            live = build_universe(observed, top_n)
+            # 주말·휴장일 스냅숏은 시총이 전부 비어 있다(2026-11-01 일요일 실측). 기준본 뒤로
+            # 거래일이 없을 때만 기준본이 최신 세션이므로 그대로 쓴다.
+            if live.empty and not krx_calendar.trading_days(source_date + timedelta(days=1), observed_date):
+                return universe
+            universe = live
             source_date = universe.attrs.get("source_date")
             if universe.empty or source_date != observed_date or source_date > snap:
                 raise ValueError()

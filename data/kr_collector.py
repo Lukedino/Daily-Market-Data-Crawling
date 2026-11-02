@@ -49,6 +49,8 @@ class KrCollectionError(RuntimeError):
 
 def _response_bytes(get, url: str, headers: dict, limit: int) -> bytes:
     with get(url, headers=headers, timeout=(5, 20), stream=True, allow_redirects=False) as response:
+        if 300 <= response.status_code < 400:
+            raise KrCollectionError("kr_source_redirected")  # 주소가 옮겨졌다 — 재시도로 풀리지 않는다
         if response.status_code != 200:
             raise KrCollectionError("kr_source_failed")
         body = bytearray()
@@ -93,7 +95,8 @@ def read_krx_snapshot(*, request_get=None) -> pd.DataFrame:
         get = request_get or requests.get
         headers = {"User-Agent": "Mozilla/5.0", "Referer":
             "https://data.krx.co.kr/contents/MDC/MDI/outerLoader/index.cmd"}
-        url = ("http://data.krx.co.kr/comm/bldAttendant/executeForResourceBundle.cmd"
+        # KRX 가 http 를 https 로 301 하고 아래 호출은 리다이렉트를 따르지 않는다(2026-10-29~).
+        url = ("https://data.krx.co.kr/comm/bldAttendant/executeForResourceBundle.cmd"
                "?baseName=krx.mdc.i18n.component&key=B128.bld")
         raw = _response_bytes(get, url, headers, 1024 * 1024)
         payload = json.loads(raw)
@@ -101,24 +104,47 @@ def read_krx_snapshot(*, request_get=None) -> pd.DataFrame:
         if not isinstance(selected, str) or not re.fullmatch(r"[0-9]{8}", selected):
             raise KrCollectionError("source_date_unverified")
         source_day = datetime.strptime(selected, "%Y%m%d").date()
-        csv_url = ("https://raw.githubusercontent.com/FinanceData/fdr_krx_data_cache/"
-                   f"refs/heads/master/data/listing/krx/{source_day.isoformat()}.csv")
-        body = _response_bytes(get, csv_url, headers, 16 * 1024 * 1024)
-        frame = pd.read_csv(io.BytesIO(body), index_col=0,
-            dtype={"Code": str, "Dept": str, "ChangeCode": str, "MarketId": str}).reset_index(drop=True)
-        required = {"Code", "MarketId", "Open", "High", "Low", "Close", "Volume", "Marcap", "Stocks"}
-        if frame.empty or not required.issubset(frame) or frame.columns.has_duplicates:
+        return _read_cached_session(get, source_day, headers)
+    except KrCollectionError:
+        raise
+    except Exception:
+        raise KrCollectionError("kr_source_failed") from None
+
+
+def _read_cached_session(get, source_day: date, headers: dict) -> pd.DataFrame:
+    csv_url = ("https://raw.githubusercontent.com/FinanceData/fdr_krx_data_cache/"
+               f"refs/heads/master/data/listing/krx/{source_day.isoformat()}.csv")
+    body = _response_bytes(get, csv_url, headers, 16 * 1024 * 1024)
+    frame = pd.read_csv(io.BytesIO(body), index_col=0,
+        dtype={"Code": str, "Dept": str, "ChangeCode": str, "MarketId": str}).reset_index(drop=True)
+    required = {"Code", "MarketId", "Open", "High", "Low", "Close", "Volume", "Marcap", "Stocks"}
+    if frame.empty or not required.issubset(frame) or frame.columns.has_duplicates:
+        raise KrCollectionError("kr_snapshot_invalid")
+    if (frame["Code"].isna().any() or frame["Code"].duplicated().any()
+            or not frame["Code"].str.fullmatch(r"[0-9A-Z]{6}").all()
+            or not frame["MarketId"].isin(["STK", "KSQ", "KNX"]).all()):
+        raise KrCollectionError("kr_snapshot_invalid")
+    if "Date" in frame and not pd.to_datetime(frame["Date"]).dt.date.eq(source_day).all():
+        raise KrCollectionError("source_date_unverified")
+    frame["Date"] = pd.Timestamp(source_day)
+    frame.attrs["krx_snapshot"] = {"version": 1, "provider": "fdr_krx_cache",
+                                     "source_date": source_day.isoformat()}
+    snapshot_source_date(frame)
+    return frame
+
+
+def read_krx_session(day: date, *, request_get=None) -> pd.DataFrame:
+    """이미 지난 거래일의 최종 캐시. KRX 날짜 조회 없이 그날 파일을 바로 읽는다.
+
+    주말·휴장일 파일은 종목만 있고 시총이 전부 비어 있어 세션으로 받지 않는다. CSV 에 날짜 열이
+    없어 source_date 는 파일명의 자기 선언이다 — 실제 검증은 호출자의 달력과 이 시총 검사다.
+    """
+    try:
+        if version("finance-datareader") != "0.9.202":
+            raise KrCollectionError("fdr_version_unverified")
+        frame = _read_cached_session(request_get or requests.get, day, {"User-Agent": "Mozilla/5.0"})
+        if (pd.to_numeric(frame["Marcap"], errors="coerce") > 0).mean() < 0.9:
             raise KrCollectionError("kr_snapshot_invalid")
-        if (frame["Code"].isna().any() or frame["Code"].duplicated().any()
-                or not frame["Code"].str.fullmatch(r"[0-9A-Z]{6}").all()
-                or not frame["MarketId"].isin(["STK", "KSQ", "KNX"]).all()):
-            raise KrCollectionError("kr_snapshot_invalid")
-        if "Date" in frame and not pd.to_datetime(frame["Date"]).dt.date.eq(source_day).all():
-            raise KrCollectionError("source_date_unverified")
-        frame["Date"] = pd.Timestamp(source_day)
-        frame.attrs["krx_snapshot"] = {"version": 1, "provider": "fdr_krx_cache",
-                                         "source_date": source_day.isoformat()}
-        snapshot_source_date(frame)
         return frame
     except KrCollectionError:
         raise
@@ -218,7 +244,15 @@ def verify_against_reference(frame: pd.DataFrame, reference: Optional[pd.DataFra
 
 def collect_daily() -> pd.DataFrame:
     """한 원천 응답의 세 시장을 합친다. 지난 세션을 today로 바꾸지 않는다."""
-    frame = read_krx_snapshot()
+    return _normalized_snapshot(read_krx_snapshot())
+
+
+def collect_session(day: date) -> pd.DataFrame:
+    """지난 거래일 하나를 당일 수집과 같은 형태·같은 원천 증명으로 돌려준다."""
+    return _normalized_snapshot(read_krx_session(day))
+
+
+def _normalized_snapshot(frame: pd.DataFrame) -> pd.DataFrame:
     proof = dict(frame.attrs["krx_snapshot"])
     if "ChagesRatio" in frame:
         if "ChangesRatio" in frame:

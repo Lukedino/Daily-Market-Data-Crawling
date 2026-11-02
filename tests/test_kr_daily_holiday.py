@@ -71,6 +71,10 @@ def kr_stubs(monkeypatch, tmp_path):
                         lambda *a, **k: calls.append("backfill") or pd.DataFrame())
     monkeypatch.setattr(kr_collector, "collect_missing_today", lambda *a, **k: pd.DataFrame())
 
+    def no_cached_session(day):
+        raise kr_collector.KrCollectionError("kr_source_failed")
+    monkeypatch.setattr(kr_collector, "collect_session", no_cached_session)
+
     def fdr_snapshot():
         calls.append("collect_daily")
         frame = pd.DataFrame({"Code": ["005930"], "Name": ["삼성전자"], "Market": ["KOSPI"],
@@ -100,6 +104,41 @@ def test_real_trading_day_gap_still_backfills(kr_stubs, monkeypatch):
     monkeypatch.setattr(kr_collector, "validate_price_basis", lambda frame: None)
     kr_main.run_kr_daily(_ARGS, today=date(2026, 9, 29))
     assert "backfill" in kr_stubs
+
+
+def _cached_session(calls, unavailable=()):
+    def collect(day):
+        calls.append(("session", day))
+        if day in unavailable:
+            raise kr_collector.KrCollectionError("kr_source_failed")
+        frame = pd.DataFrame({"Code": ["005930"], "Name": ["삼성전자"], "Market": ["KOSPI"],
+                              "Close": [270000.0], "Date": [pd.Timestamp(day)]})
+        frame.attrs["krx_snapshot"] = {"version": 1, "provider": "fdr_krx_cache",
+                                       "source_date": day.isoformat()}
+        return frame
+    return collect
+
+
+def test_missed_session_is_filled_from_source_cache_not_yfinance(kr_stubs, monkeypatch):
+    """원천 장애가 끝난 다음 실행이 사람 없이 놓친 날을 복구한다(10-29·10-30·11-02 수동 복구 재발 방지)."""
+    monkeypatch.setattr(kr_collector, "collect_session", _cached_session(kr_stubs))
+    kr_main.run_kr_daily(_ARGS, today=date(2026, 9, 29))
+    assert ("session", date(2026, 9, 28)) in kr_stubs
+    assert "backfill" not in kr_stubs
+    assert kr_stubs.index("upload") < kr_stubs.index("collect_daily"), "오늘 수집이 실패해도 복구분은 남는다"
+
+
+def test_unfilled_sessions_fall_through_to_backfill_from_first_failure(kr_stubs, monkeypatch):
+    monkeypatch.setattr(kr_collector, "collect_session",
+                        _cached_session(kr_stubs, unavailable={date(2026, 9, 29)}))
+    monkeypatch.setattr(kr_collector, "validate_price_basis", lambda frame: None)
+    seen = {}
+    def backfill(start, end, **kwargs):
+        seen.update(start=start, end=end)
+        return pd.DataFrame()
+    monkeypatch.setattr(kr_collector, "collect_backfill", backfill)
+    kr_main.run_kr_daily(_ARGS, today=date(2026, 9, 30))
+    assert seen == {"start": "2026-09-29", "end": "2026-09-29"}
 
 
 def test_weekday_logic_is_kept_when_the_calendar_is_unavailable(kr_stubs, monkeypatch):

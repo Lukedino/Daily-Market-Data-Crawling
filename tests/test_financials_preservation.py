@@ -299,6 +299,28 @@ def test_newer_live_snapshot_is_used_as_universe(monkeypatch):
     assert universe.attrs["source_date"] == date(2026, 10, 1)
 
 
+def closed_day_snapshot(day):
+    return pd.DataFrame([{"Code": "000660", "Stocks": 7, "Marcap": float("nan"), "Date": day}])
+
+
+def test_closed_day_snapshot_keeps_baseline_of_latest_session(monkeypatch):
+    # 일요일 스냅숏은 시총이 비어 있고 기준본의 금요일이 최신 세션이다(2026-11-01 universe_unverified).
+    from data import kr_collector
+    setup_kr(monkeypatch, marcap(date(2026, 10, 30)), observed=date(2026, 11, 1))
+    monkeypatch.setattr(kr_collector, "read_krx_snapshot", lambda: closed_day_snapshot(date(2026, 11, 1)))
+    universe = kr._load_verified_universe(1000, date(2026, 11, 1), upload=False)
+    assert universe.attrs["source_date"] == date(2026, 10, 30)
+
+
+def test_closed_day_snapshot_does_not_excuse_missed_session(monkeypatch):
+    # 기준본이 수요일에 멈춰 있으면 목·금 세션을 놓친 것이다 — 낡은 기준본으로 고르지 않는다.
+    from data import kr_collector
+    setup_kr(monkeypatch, marcap(date(2026, 10, 28)), observed=date(2026, 11, 1))
+    monkeypatch.setattr(kr_collector, "read_krx_snapshot", lambda: closed_day_snapshot(date(2026, 11, 1)))
+    with pytest.raises(db.FinancialsStateError, match="universe_unverified"):
+        kr._load_verified_universe(1000, date(2026, 11, 1), upload=False)
+
+
 def test_live_snapshot_rows_must_match_its_source_date(monkeypatch):
     from data import kr_collector
     setup_kr(monkeypatch, marcap(date(2026, 9, 30)), observed=date(2026, 10, 1))
