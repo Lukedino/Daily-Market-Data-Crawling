@@ -14,7 +14,7 @@
 3. `tests/`
 
 ## 구조 한 줄 요약
-GitHub Actions 가 US/Crypto OHLC, KR 일별 스냅샷, US/KR 재무를 수집해 연도별 Parquet 으로 Google Drive 에 저장한다. 저장소에는 데이터를 커밋하지 않는다. `ohlc-daily` 의 정시 트리거는 외부(비공개) 디스패처가 `workflow_dispatch` 로 호출한다.
+GitHub Actions 가 US/Crypto OHLC, KR 일별 스냅샷, US/KR 재무를 수집해 연도별 Parquet 으로 Google Drive 에 저장한다. 저장소에는 데이터를 커밋하지 않는다. `ohlc-daily`·`kr-daily`·`financials-update` 의 정시 트리거는 외부(비공개) 디스패처가 `workflow_dispatch` 로 호출한다.
 
 ## 검토(크로스체크) 규칙
 - 요청이 없으면 **파일을 고치지 말고** 보고서만 쓴다. 커밋·push·배포·워크플로 실행 금지.
