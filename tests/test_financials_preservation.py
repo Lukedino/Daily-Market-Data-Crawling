@@ -274,7 +274,9 @@ def test_unverified_universe_blocks_dart_and_publish(monkeypatch, fault):
     if fault == "download": states = {2025: "ok", 2026: "failed"}
     if fault == "empty": frame = marcap().iloc[:0]
     if fault == "stale": observed = date(2026, 9, 23)
-    if fault == "ohlc": frame = pd.concat([marcap(date(2026, 9, 21)), marcap(cap=0, stocks=0)])
+    # OHLC 전용 최신일 + 그보다 오래된 스냅숏 — 그날 세션을 증명할 원천이 없다(DM-11 이후에도 차단).
+    if fault == "ohlc":
+        frame, observed = pd.concat([marcap(date(2026, 9, 21)), marcap(cap=0, stocks=0)]), date(2026, 9, 21)
     if fault == "previous": frame = marcap(date(2025, 12, 31))
     if fault == "future": frame = marcap(date(2026, 9, 23))
     setup_kr(monkeypatch, frame, states, observed)
@@ -492,3 +494,58 @@ def test_collector_stores_yahoo_infinity_as_missing(monkeypatch):
     monkeypatch.setattr(yfinance, "Ticker", lambda t: SimpleNamespace(info=info))
     row = fc._fetch_ratios_snapshot("LOSS", date(2026, 10, 1))
     assert row["PE"] is None and row["PS"] is None and row["PB"] == 2.5
+
+
+# ── DM-11: 마지막 저장일이 야후 폴백일(Marcap 결측)인 기준본 ──
+# 오늘 원천이 실패해 검증 폴백으로 저장한 날은 시총이 비어 있다. 그날이 마지막 저장일이면
+# 기준본만으로는 최신 세션의 유니버스를 증명할 수 없지만, 같은 원천의 그날 이후 스냅숏은
+# 증명할 수 있다 — 그 스냅숏으로 고르고, 증명할 수 없으면 종전대로 universe_unverified.
+def fallback_tail(valid_day, fallback_day):
+    fallback = pd.DataFrame([{"Code": "005930", "Stocks": None, "Marcap": float("nan"),
+                              "Date": fallback_day}])
+    return pd.concat([marcap(valid_day), fallback], ignore_index=True)
+
+
+@pytest.mark.parametrize("observed", [date(2026, 9, 30), date(2026, 10, 1)])
+def test_fallback_tail_uses_live_snapshot_of_that_session_or_later(monkeypatch, observed):
+    from data import kr_collector
+    setup_kr(monkeypatch, fallback_tail(date(2026, 9, 29), date(2026, 9, 30)), observed=observed)
+    live = pd.DataFrame([{"Code": "000660", "Stocks": 7, "Marcap": 900, "Date": observed}])
+    monkeypatch.setattr(kr_collector, "read_krx_snapshot", lambda: live)
+    universe = kr._load_verified_universe(1000, date(2026, 10, 1), upload=False)
+    assert list(universe["Code"]) == ["000660"]
+    assert universe.attrs["source_date"] == observed
+
+
+def test_fallback_tail_with_older_snapshot_is_unverified(monkeypatch):
+    # 스냅숏이 폴백일보다 오래됐으면 폴백일 세션의 유니버스는 아무도 증명하지 못한다.
+    setup_kr(monkeypatch, fallback_tail(date(2026, 9, 29), date(2026, 9, 30)), observed=date(2026, 9, 29))
+    with pytest.raises(db.FinancialsStateError, match="universe_unverified"):
+        kr._load_verified_universe(1000, date(2026, 10, 1), upload=False)
+
+
+def test_fallback_tail_with_closed_day_snapshot_is_unverified(monkeypatch):
+    # 금요일이 폴백일이면 일요일 빈 스냅숏 뒤로 목요일 기준본을 쓰면 안 된다(금요일 세션 누락).
+    from data import kr_collector
+    setup_kr(monkeypatch, fallback_tail(date(2026, 10, 29), date(2026, 10, 30)), observed=date(2026, 11, 1))
+    monkeypatch.setattr(kr_collector, "read_krx_snapshot", lambda: closed_day_snapshot(date(2026, 11, 1)))
+    with pytest.raises(db.FinancialsStateError, match="universe_unverified"):
+        kr._load_verified_universe(1000, date(2026, 11, 1), upload=False)
+
+
+def test_fallback_tail_with_failed_source_blocks_dart_and_publish(monkeypatch):
+    # 원천 실패는 빈 프레임이 아니라 typed 오류다 — read_krx_snapshot 자체가 던지게 해 시험한다.
+    from data import kr_collector
+    setup_kr(monkeypatch, fallback_tail(date(2026, 9, 29), date(2026, 9, 30)), observed=date(2026, 10, 1))
+
+    def source_down():
+        raise kr_collector.KrCollectionError("kr_source_failed")
+    monkeypatch.setattr(kr_collector, "read_krx_snapshot", source_down)
+    u = Drive()
+    monkeypatch.setattr(db, "_get_uploader", lambda *a: u)
+
+    class NoDart:
+        def finstate(self, *a, **kw): pytest.fail("DART must not run")
+    with pytest.raises(db.FinancialsStateError, match="universe_unverified"):
+        kr.collect_kr_financials(upload=True, dart=NoDart(), years=[2026], today=date(2026, 10, 1))
+    assert u.uploads == []

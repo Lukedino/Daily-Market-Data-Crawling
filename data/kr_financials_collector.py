@@ -255,11 +255,15 @@ def _load_verified_universe(top_n, snap, *, upload, uploader=None):
         source_date = universe.attrs.get("source_date")
         # 전년도 기준만 있는 연초는 오래된 Stocks의 허용 정책을 새로 추정하지 않는다.
         if (universe.empty or source_date is None or source_date.year != snap.year
-                or source_date > snap or universe.attrs["latest_known_date"] != source_date):
+                or source_date > snap):
             raise ValueError()
+        # 마지막 저장일이 야후 폴백일(Marcap 결측)이면 기준본은 그 세션을 증명하지 못한다(DM-11).
+        # 같은 원천의 그날 이후 스냅숏만 증명할 수 있으므로 그보다 오래된 스냅숏은 거절하고,
+        # 아래 더 새로운 스냅숏 경로가 기준본 대신 그 스냅숏으로 고른다.
+        latest_known = universe.attrs["latest_known_date"]
         observed = read_krx_snapshot()
         observed_date = snapshot_source_date(observed)
-        if observed_date < source_date:
+        if observed_date < max(source_date, latest_known):
             raise ValueError()
         # 원천 캐시는 05시 KST 에 그날 파일을 만들고 기준본은 23시 KST kr-daily 에서야 따라잡는다.
         # 평일 낮 실행은 늘 하루 앞선 스냅숏을 보므로, 더 새로우면 같은 원천의 그 스냅숏으로 고른다
