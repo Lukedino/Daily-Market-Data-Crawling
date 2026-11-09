@@ -302,3 +302,23 @@ def test_public_formatter_caps_ticker_list():
 
 def test_public_formatter_rejects_unknown_market():
     assert "basis_market" not in _render(basis_market="kr/../x")
+
+
+def test_a_new_ticker_saved_through_today_does_not_unexempt_other_unsettled_bars(local):
+    """2026-11-09: 신규 종목 백필이 11-09 봉까지 저장하자 파일 최댓값이 11-09 가 됐고,
+    다른 195/196 종목의 미완성 11-07 봉이 면제에서 빠져 크립토가 3회 연속 멈췄다.
+    면제 기준은 종목별 마지막 저장일이어야 한다."""
+    tickers = [f"C{i:03}-USD" for i in range(20)]
+    days = [date(2026, 11, 5), date(2026, 11, 6), date(2026, 11, 7), date(2026, 11, 8)]
+    stored = pd.concat([_many(tickers).assign(Date=d) for d in days], ignore_index=True)
+    newcomer = pd.concat([_many(["NEW-USD"]).assign(Date=d) for d in days + [date(2026, 11, 9)]])
+    db.save_year(pd.concat([stored, newcomer], ignore_index=True), "crypto", 2026)
+    candidate = pd.concat([_many(tickers).assign(Date=d) for d in days], ignore_index=True)
+    candidate.loc[candidate["Date"] >= date(2026, 11, 7), "Close"] = 10.5   # 11-07·08 확정되며 바뀜
+    candidate.attrs["ohlc_request"] = {"actions_complete": True, "action_tickers": []}
+    db.validate_price_basis(candidate, "crypto", as_of=date(2026, 11, 9))
+
+    # 면제 밖(11-06)이 바뀌면 여전히 잡는다.
+    candidate.loc[candidate["Date"] == date(2026, 11, 6), "Close"] = 10.5
+    with pytest.raises(db.PriceBasisError, match="price_basis_mismatch"):
+        db.validate_price_basis(candidate, "crypto", as_of=date(2026, 11, 9))
