@@ -155,3 +155,34 @@ def test_nullable_new_row_does_not_rewrite_prior_zero_or_valid_metadata(tmp_path
     restored = kr_db.load_year(2026, strict=True)
     assert restored.loc[restored.Code == "247540", "Stocks"].iloc[0] == 0
     assert pd.isna(restored.loc[restored.Date == pd.Timestamp("2026-09-21"), "Stocks"].iloc[0])
+
+
+# DM-12 하류 계약 — KIS(kr_eod_data)·Mr.Market(step3a·step4·step6)·ML(historical_builder 등)은
+# marcap-YYYY.parquet 을 평범한 pd.read_parquet 로 읽고 Date·Code·OHLCV·Marcap 만 쓴다
+# (2026-11-10 정적 확인, Stocks·Rank 소비처 0). 그 열들은 Marcap 결측 폴백 행이 섞여도
+# numpy 형식으로 남아야 하고(astype(float).values·np.mean 등), pd.NA 를 담는 nullable
+# 형식은 Stocks·Rank 뿐이어야 한다. 이 계약이 바뀌면 하류 감사를 다시 해야 한다.
+_DOWNSTREAM_COLUMNS = ("Open", "High", "Low", "Close", "Volume", "Marcap")
+
+
+def test_downstream_columns_stay_numpy_when_fallback_row_is_saved(tmp_path, monkeypatch):
+    monkeypatch.setattr(kr_db, "local_path", lambda year: tmp_path / f"marcap-{year}.parquet")
+    kr_db.append_rows(kc._normalize_schema(snapshot()))
+    fallback = kc._normalize_schema(snapshot("2026-09-21").iloc[:1].copy())
+    fallback["Marcap"] = float("nan")
+    fallback["Stocks"] = pd.Series([pd.NA], dtype="Int64")
+    fallback["Rank"] = pd.Series([pd.NA], dtype="Int64")
+    kr_db.append_rows(fallback, ohlc_only=True)
+
+    restored = pd.read_parquet(tmp_path / "marcap-2026.parquet")   # 하류와 같은 읽기
+    assert len(restored) == 4 and restored["Marcap"].isna().sum() == 1
+    for column in _DOWNSTREAM_COLUMNS:
+        dtype = restored[column].dtype
+        assert not pd.api.types.is_extension_array_dtype(dtype), column
+        assert pd.api.types.is_numeric_dtype(dtype), column
+        assert restored[column].astype(float).to_numpy().dtype == "float64"
+    nullable = {c for c in restored.columns
+                if pd.api.types.is_extension_array_dtype(restored[c].dtype)
+                and not pd.api.types.is_string_dtype(restored[c].dtype)}
+    assert nullable <= {"Stocks", "Rank"}
+    assert restored["Stocks"].isna().sum() == 1   # 합성 스냅숏은 Rank 를 주지 않아 Rank 는 전부 결측
