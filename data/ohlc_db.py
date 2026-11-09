@@ -339,7 +339,7 @@ def validate_price_basis(df: pd.DataFrame, market: str, *, as_of: date | None = 
     # 기준이 통째로 바뀐 것(예: 조정가↔원가)과 몇 종목의 소급 재조정을 구분한다.
     # 전자는 파일을 오염시키므로 막아야 하지만, 후자로 시장 전체를 버리면
     # 수집이 멈춘다. 종목 수로 세고 연도 파일 축소 가드와 같은 임계를 쓴다.
-    compared, mismatched = set(), set()
+    compared, mismatched, mismatch_days = set(), set(), set()
     for year in sorted({day.year for day in incoming["Date"]}):
         existing = load_year(market, year, strict=True)
         if existing.empty:
@@ -379,12 +379,32 @@ def validate_price_basis(df: pd.DataFrame, market: str, *, as_of: date | None = 
             before, after = values["Close"]
             if not math.isclose(before, after, rel_tol=1e-7, abs_tol=1e-8):
                 mismatched.add(key[0])
+                mismatch_days.add(key[1])
     if mismatched:
+        metrics = _price_basis_metrics(market, incoming, compared, mismatched, mismatch_days)
         # 비교한 종목 대비 비율로 판정한다 — 한 줌이면 놓친 소급 재조정이고,
         # 대부분이면 공급자가 기준 자체를 바꾼 것이다.
         if len(mismatched) > len(compared) * TICKER_SHRINK_TOLERANCE_PCT / 100.0:
+            # 공개 로그엔 코드만 남아 무엇이 어긋났는지 알 수 없었다(2026-11-09 crypto
+            # 2회 연속 실패, 로컬 재현은 통과). 검토된 수치·크립토 종목명만 남긴다.
+            logger.error("price_basis_checked", extra={"public_metrics": metrics})
             raise PriceBasisError("price_basis_mismatch")
-        logger.warning("price_basis_mismatch_tolerated")
+        logger.warning("price_basis_mismatch_tolerated", extra={"public_metrics": metrics})
+
+
+def _price_basis_metrics(market, incoming, compared, mismatched, mismatch_days) -> dict:
+    metrics = {
+        "basis_market": market,
+        "basis_compared": len(compared),
+        "basis_mismatched": len(mismatched),
+        "basis_from": min(incoming["Date"]).isoformat(),
+        "basis_to": max(incoming["Date"]).isoformat(),
+        "basis_mismatch_from": min(mismatch_days).isoformat(),
+        "basis_mismatch_to": max(mismatch_days).isoformat(),
+    }
+    if market == "crypto":   # US 유니버스엔 개인 관심 종목이 섞인다 — 이름을 싣지 않는다.
+        metrics["basis_tickers"] = sorted(mismatched)
+    return metrics
 
 
 def _preserve_missing_marketcap(existing: pd.DataFrame, incoming: pd.DataFrame) -> pd.DataFrame:

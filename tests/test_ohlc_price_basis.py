@@ -223,3 +223,82 @@ def test_a_close_that_moved_across_the_board_is_still_caught(local):
     candidate.attrs["ohlc_request"] = {"actions_complete": True, "action_tickers": []}
     with pytest.raises(db.PriceBasisError, match="price_basis_mismatch"):
         db.validate_price_basis(candidate, "us")
+
+
+def _basis_record(caplog, event):
+    found = [r for r in caplog.records if r.msg == event]
+    assert len(found) == 1
+    return found[0].public_metrics
+
+
+def test_mismatch_logs_reviewed_metrics_and_crypto_names(local, caplog):
+    """2026-11-09: crypto 가 2회 연속 price_basis_mismatch 로 멈췄는데 공개 로그엔
+    코드만 남아 원인을 알 수 없었다. 수치·크립토 종목명을 남긴다."""
+    tickers = [f"C{i:03}-USD" for i in range(20)]
+    later = _many(tickers).assign(Date=date(2026, 1, 10))   # 01-05 를 미확정 면제 밖으로
+    db.save_year(pd.concat([_many(tickers), later], ignore_index=True), "crypto", 2026)
+    candidate = _many(tickers)
+    candidate.loc[candidate["Ticker"].isin(tickers[:3]), "Close"] = 9.0   # 3/20 > 5%
+    candidate.attrs["ohlc_request"] = {"actions_complete": True, "action_tickers": []}
+    with pytest.raises(db.PriceBasisError, match="price_basis_mismatch"):
+        db.validate_price_basis(candidate, "crypto", as_of=date(2026, 12, 31))
+    m = _basis_record(caplog, "price_basis_checked")
+    assert (m["basis_market"], m["basis_compared"], m["basis_mismatched"]) == ("crypto", 20, 3)
+    assert m["basis_tickers"] == tickers[:3]
+    assert m["basis_from"] <= m["basis_mismatch_from"] <= m["basis_mismatch_to"] <= m["basis_to"]
+
+
+def test_us_mismatch_never_logs_ticker_names(local, caplog):
+    """US 유니버스엔 개인 관심 종목이 섞인다 — 공개 artifact 에 이름을 싣지 않는다."""
+    tickers = [f"T{i:03}" for i in range(100)]
+    db.save_year(_many(tickers), "us", 2026)
+    candidate = _many(tickers, close=9.98)
+    candidate.attrs["ohlc_request"] = {"actions_complete": True, "action_tickers": []}
+    with pytest.raises(db.PriceBasisError):
+        db.validate_price_basis(candidate, "us")
+    m = _basis_record(caplog, "price_basis_checked")
+    assert "basis_tickers" not in m and m["basis_mismatched"] == 100
+
+
+def test_tolerated_mismatch_also_logs_metrics(local, caplog):
+    tickers = [f"T{i:03}" for i in range(100)]
+    db.save_year(_many(tickers), "us", 2026)
+    candidate = _many(tickers)
+    candidate.loc[candidate["Ticker"].isin(tickers[:3]), "Close"] = 9.98
+    candidate.attrs["ohlc_request"] = {"actions_complete": True, "action_tickers": []}
+    db.validate_price_basis(candidate, "us")
+    m = _basis_record(caplog, "price_basis_mismatch_tolerated")
+    assert (m["basis_compared"], m["basis_mismatched"]) == (100, 3)
+
+
+def _render(**metrics):
+    import logging
+    from data import execution_safety
+    record = logging.LogRecord("x", logging.ERROR, "ohlc_db.py", 1, "price_basis_checked", (), None)
+    record.public_metrics = metrics
+    return execution_safety.PublicFormatter().format(record)
+
+
+def test_public_formatter_renders_basis_metrics():
+    line = _render(basis_market="crypto", basis_compared=142, basis_mismatched=9,
+                   basis_from="2026-11-02", basis_to="2026-11-09",
+                   basis_mismatch_from="2026-11-02", basis_mismatch_to="2026-11-06",
+                   basis_tickers=["ARB-USD", "USDT-USDT"])
+    assert line.endswith("price_basis_checked basis_market=crypto basis_compared=142 basis_mismatched=9 "
+                         "basis_from=2026-11-02 basis_to=2026-11-09 basis_mismatch_from=2026-11-02 "
+                         "basis_mismatch_to=2026-11-06 basis_tickers=ARB-USD,USDT-USDT")
+
+
+@pytest.mark.parametrize("tickers", [["AAPL"], ["ARB-USD", "MSFT"], ["arb-usd"], ["C:/x-USD"],
+                                     "ARB-USD", [], [1]])
+def test_public_formatter_drops_non_crypto_or_malformed_tickers(tickers):
+    assert "basis_tickers" not in _render(basis_tickers=tickers)
+
+
+def test_public_formatter_caps_ticker_list():
+    names = [f"C{i:03}-USD" for i in range(45)]
+    assert _render(basis_tickers=names).endswith("C039-USD,+5")
+
+
+def test_public_formatter_rejects_unknown_market():
+    assert "basis_market" not in _render(basis_market="kr/../x")

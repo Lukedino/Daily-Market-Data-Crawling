@@ -64,7 +64,7 @@ _EVENTS = {"operation_failed", "writer_busy", "external_output_suppressed",
            "collection_incomplete_tolerated", "session_unverified_tolerated",
            "market_failed", "cursor_held_for_sparse_session",
            "sparse_session_abandoned", "sparse_session_excluded",
-           "price_basis_mismatch_tolerated",
+           "price_basis_mismatch_tolerated", "price_basis_checked",
            "kr_market_closed", "kr_calendar_unavailable", "kr_source_fallback_attempted",
            "rebase_started", "rebase_completed", "rebase_deferred",
            "stale_ticker_excluded",
@@ -143,6 +143,25 @@ def _metric_source(value):
     return value if isinstance(value, str) and value in _METRIC_SOURCES else None
 
 
+def _metric_market(value):
+    return value if isinstance(value, str) and value in {"us", "crypto"} else None
+
+
+_CRYPTO_TICKER = re.compile(r"[A-Z0-9]{1,20}-USDT?")
+_MAX_PUBLIC_TICKERS = 40
+
+
+def _metric_crypto_tickers(value):
+    """크립토 종목명만(CMC 공개 목록). US 는 개인 관심 종목이 섞여 있어 받지 않는다."""
+    if not isinstance(value, (list, tuple)) or not value:
+        return None
+    if not all(isinstance(t, str) and _CRYPTO_TICKER.fullmatch(t) for t in value):
+        return None
+    shown = list(value)[:_MAX_PUBLIC_TICKERS]
+    more = len(value) - len(shown)
+    return ",".join(shown) + (f",+{more}" if more else "")
+
+
 # 공개 artifact 에 숫자로만 남기는 검토된 필드(2026-10-10, KR 종목 범위 게이트).
 # 보존 계약(docs/2026-09-22-data-preservation.md)의 "원문 대신 별도 검토한 구조화 필드"
 # 다. 값마다 형식을 검사하고 통과한 것만 고정 순서로 쓴다 — 경로·URL·임의 문자열은
@@ -160,6 +179,15 @@ _PUBLIC_METRICS = (
     ("kr_provisional_sessions", _metric_count),
     ("kr_rows_dropped", _metric_count),
     ("kr_final_rows", _metric_count),
+    # 가격 기준 대조(2026-11-09 crypto price_basis_mismatch 진단). 종목명은 크립토만.
+    ("basis_market", _metric_market),
+    ("basis_compared", _metric_count),
+    ("basis_mismatched", _metric_count),
+    ("basis_from", _metric_date),
+    ("basis_to", _metric_date),
+    ("basis_mismatch_from", _metric_date),
+    ("basis_mismatch_to", _metric_date),
+    ("basis_tickers", _metric_crypto_tickers),
 )
 
 
