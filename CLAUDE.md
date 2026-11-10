@@ -105,6 +105,13 @@ python main.py --mode kr-settle --start-date 2026-01-01 --drop-closed-dates 2026
 python main.py --mode ohlc-new-backfill --market us --upload-drive
 ```
 
+**로컬 테스트**: 전용 `.venv`(gitignore)에 고정 의존성을 설치해 돌린다. 전역 Python 의 FDR(0.9.110)로 돌리면 KR 원천 테스트 10건이 `fdr_version_unverified` 로 실패한다.
+`requirements.txt` 는 ASCII 만 쓴다 — 이 PC 의 pip 이 cp949 로 읽어 한글 주석이 있으면 설치가 깨진다.
+```bash
+python -m venv .venv && .venv/Scripts/python.exe -m pip install -r requirements.txt pytest
+.venv/Scripts/python.exe -m pytest tests -q   # 경로 인자 필수 — 폴더명의 [] 를 pytest 가 파라미터로 오인
+```
+
 ---
 
 ## 데이터 구조 및 주요 모듈

@@ -1,5 +1,6 @@
-# 2026-08-31 보안점검 ⑦: CI 러너에 시크릿이 주입되므로 공급망 방어를 위해 버전을 고정한다.
-# 기준 = 최근 성공한 CI 가 실제 설치한 버전(실측). 올릴 때는 의도적으로 수정 후 테스트·CI 확인.
+# Keep this file ASCII-only: pip on this Windows PC reads it as cp949 (2026-11-10).
+# 2026-08-31 security review 7: CI runners receive secrets, so every version is pinned.
+# Baseline = versions the last successful CI actually installed. Bump deliberately, then run tests and CI.
 pykrx==1.2.4
 yfinance==1.7.0
 finance-datareader==0.9.202
@@ -17,5 +18,5 @@ google-auth-httplib2==0.4.2
 google-auth-oauthlib==1.4.1
 tqdm==4.70.0
 python-dotenv==1.2.3
-# KRX trading calendar (financial_holidays("XKRX")) — KIS-Trading trader/constraints.in 과 같은 핀
+# KRX trading calendar (financial_holidays("XKRX")) - same pin as KIS-Trading trader/constraints.in
 holidays==0.105
