@@ -21,8 +21,12 @@ data/drive_uploader.py — Google Drive 업로드/다운로드
 import logging
 import os
 import re
+import http.client
+import json
 import shutil
+import ssl
 import tempfile
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -34,6 +38,58 @@ SCOPES = ["https://www.googleapis.com/auth/drive"]
 MIME_PARQUET = "application/octet-stream"
 MIME_JSON    = "application/json"
 MIME_FOLDER  = "application/vnd.google-apps.folder"
+
+# 일시적 Drive 오류 재시도. 2026-11-11 09:45 KST OHLC 실행이 연도 Parquet 업로드
+# 한 번의 실패(26초)로 drive_sync_failed 가 됐다 — 재시도가 0회였다.
+#  - 목록 조회(읽기·멱등)는 googleapiclient 의 num_retries 에 맡긴다.
+#  - 업로드는 바깥에서 통째로 다시 한다. 라이브러리의 이어받기 조각 PUT 은 연결
+#    끊김을 재시도하지 않고, 5xx 재시도는 이미 읽은 조각을 빈 본문으로 다시 보내
+#    60초 타임아웃 뒤 같은 실패가 된다(googleapiclient 2.199 http.py 1075~1093 실측).
+#    매 시도마다 파일을 다시 찾으므로, 응답만 잃은 create 는 다음 시도에서 update 로
+#    수렴해 파일이 둘로 생기지 않는다.
+#  - 폴더 확인·생성은 재시도 루프 밖에서 한 번만 한다. 폴더 create 는 응답만 잃고
+#    목록 반영이 늦으면 폴더가 둘 생겨 이후 실행이 drive_folder_ambiguous 로 막힌다.
+DRIVE_NUM_RETRIES = 3
+_TRANSIENT_HTTP_STATUS = {408, 429, 500, 502, 503, 504}
+# Drive 는 속도 제한을 429 보다 403 + 이 reason 으로 자주 돌려준다(라이브러리 판정과 같다).
+_RATE_LIMIT_REASONS = {"userRateLimitExceeded", "rateLimitExceeded"}
+
+
+def _http_error_reasons(error) -> set:
+    try:
+        body = json.loads((getattr(error, "content", b"") or b"{}").decode("utf-8"))
+        errors = (body.get("error") or {}).get("errors") or []
+        return {item.get("reason") for item in errors if isinstance(item, dict)}
+    except Exception:
+        return set()
+_sleep = time.sleep
+
+
+def _is_transient(error: BaseException) -> bool:
+    if isinstance(error, DriveStateError):
+        return False
+    try:
+        from googleapiclient.errors import HttpError
+        if isinstance(error, HttpError):
+            status = getattr(getattr(error, "resp", None), "status", None)
+            if status == 403:
+                return bool(_http_error_reasons(error) & _RATE_LIMIT_REASONS)
+            return status in _TRANSIENT_HTTP_STATUS
+    except ImportError:
+        pass
+    try:
+        import httplib2
+        if isinstance(error, httplib2.HttpLib2Error):
+            return True
+    except ImportError:
+        pass
+    try:
+        from google.auth.exceptions import TransportError   # 토큰 갱신 중 네트워크 실패
+        if isinstance(error, TransportError):
+            return True
+    except ImportError:
+        pass
+    return isinstance(error, (TimeoutError, ConnectionError, ssl.SSLError, http.client.IncompleteRead))
 
 
 class DriveStateError(RuntimeError):
@@ -124,7 +180,7 @@ class DriveUploader:
                           pageSize=1000)
             if token:
                 kwargs["pageToken"] = token
-            response = service.files().list(**kwargs).execute()
+            response = service.files().list(**kwargs).execute(num_retries=DRIVE_NUM_RETRIES)
             if (not isinstance(response, dict) or response.get("incompleteSearch", False) is not False
                     or not isinstance(response.get("files"), list)):
                 raise DriveStateError("drive_listing_incomplete")
@@ -181,13 +237,27 @@ class DriveUploader:
 
     def upload(self, local_path: str, remote_subfolder: str) -> str:
         """Update an existing slot when present; retain the existing create policy."""
-        from googleapiclient.http import MediaFileUpload
         local = Path(local_path)
         if not local.is_file() or local.is_symlink():
             raise DriveStateError("drive_upload_source_invalid")
         filename = _safe_name(local.name)
+        folder_id = self._get_or_create_folder(remote_subfolder)   # 재시도하지 않는다(위 주석)
+        attempt = 0
+        while True:
+            try:
+                return self._upload_once(local, filename, folder_id)
+            except Exception as error:
+                if attempt >= DRIVE_NUM_RETRIES or not _is_transient(error):
+                    raise
+                attempt += 1
+                # 예외 문자열에는 Drive ID 가 실릴 수 있어 종류만 적는다. GHA 에서는
+                # configure_logging 이 이 줄도 application_event 로 지운다(로컬 실행에서만 보임).
+                logger.warning(f"[Drive] upload_retry attempt={attempt} kind={type(error).__name__}")
+                _sleep(2 ** attempt)
+
+    def _upload_once(self, local: Path, filename: str, folder_id: str) -> str:
+        from googleapiclient.http import MediaFileUpload
         service = self._get_service()
-        folder_id = self._get_or_create_folder(remote_subfolder)
         existing_id = self._find_file(folder_id, filename)
         media = MediaFileUpload(str(local), mimetype=MIME_JSON if filename.endswith(".json") else MIME_PARQUET,
                                 resumable=True)

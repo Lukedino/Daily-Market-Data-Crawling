@@ -448,7 +448,7 @@ def test_real_drive_upload_string_contract_is_accepted(monkeypatch):
     from data.drive_uploader import DriveUploader
     db.save_financials(financial(), "us")
     class Response:
-        def execute(self): return {"id": "synthetic_file_id"}
+        def execute(self, **kwargs): return {"id": "synthetic_file_id"}
     class Files:
         def update(self, **kwargs):
             assert kwargs["fileId"] == "synthetic_file_id"

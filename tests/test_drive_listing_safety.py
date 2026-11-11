@@ -28,11 +28,13 @@ class Files:
         self.list_calls = []
         self.media_calls = []
         self.create_calls = []
+        self.execute_kwargs = []
 
     def list(self, **kwargs):
         self.list_calls.append(kwargs)
         response = self.pages.pop(0)
-        def execute():
+        def execute(**kwargs):
+            self.execute_kwargs.append(kwargs)
             if isinstance(response, Exception):
                 raise response
             return response
@@ -297,3 +299,141 @@ def test_success_promotes_all_valid_files_and_preserves_unselected_local(make_dr
     assert [call["fileId"] for call in api.media_calls] == ["one", "two"]
     assert api.create_calls == []
     assert not list(tmp_path.glob(".drive-stage-*"))
+
+
+
+class _Media:
+    def __init__(self, path, **kwargs):
+        self.path, self.kwargs = path, kwargs
+
+
+class _UploadFiles(Files):
+    """목록 응답은 매 시도 같은 상태를 돌려주고, update/create 결과는 스크립트대로."""
+    def __init__(self, existing, outcomes):
+        super().__init__()
+        self.existing, self.outcomes, self.writes = existing, list(outcomes), []
+
+    def list(self, **kwargs):
+        self.list_calls.append(kwargs)
+        query = kwargs["q"]
+        if "mimeType=" in query:
+            files = [item("synthetic-folder", "us", drive.MIME_FOLDER)]
+        else:
+            files = [item(self.existing, "us_2026.parquet")] if self.existing else []
+        def execute(**options):
+            self.execute_kwargs.append(options)
+            return {"files": files}
+        return SimpleNamespace(execute=execute)
+
+    def _write(self, kind, kwargs):
+        self.writes.append((kind, kwargs.get("fileId")))
+        outcome = self.outcomes.pop(0)
+        def execute(**options):
+            assert options == {}   # 조각 PUT 은 라이브러리 재시도에 맡기지 않는다
+            if isinstance(outcome, BaseException):
+                raise outcome
+            if outcome == "created-but-response-lost":
+                self.existing = "synthetic-file"
+                raise ConnectionResetError("synthetic")
+            return {"id": outcome}
+        return SimpleNamespace(execute=execute)
+
+    def update(self, **kwargs):
+        return self._write("update", kwargs)
+
+    def create(self, **kwargs):
+        return self._write("create", kwargs)
+
+
+@pytest.fixture
+def upload_env(tmp_path, monkeypatch):
+    import googleapiclient.http
+    monkeypatch.setattr(googleapiclient.http, "MediaFileUpload", _Media)
+    sleeps = []
+    monkeypatch.setattr(drive, "_sleep", sleeps.append)
+    source = tmp_path / "us_2026.parquet"
+    source.write_bytes(parquet_bytes())
+
+    def run(existing, outcomes):
+        api = _UploadFiles(existing, outcomes)
+        uploader = drive.DriveUploader(root_folder_id="synthetic-root")
+        uploader._service = SimpleNamespace(files=lambda: api)
+        return uploader, api, str(source)
+    run.sleeps = sleeps
+    return run
+
+
+def _http_error(status, reason=None):
+    import json
+    from googleapiclient.errors import HttpError
+    body = {"error": {"errors": [{"reason": reason}]}} if reason else {}
+    return HttpError(SimpleNamespace(status=status, reason="synthetic"), json.dumps(body).encode())
+
+
+def test_upload_retries_transient_failures_then_succeeds(upload_env):
+    """2026-11-11: 연도 Parquet 업로드 1회 실패로 OHLC 실행 전체가 실패했다 — 재시도 0회였다."""
+    uploader, api, source = upload_env("synthetic-file",
+                                       [TimeoutError(), _http_error(503), "synthetic-file"])
+    assert uploader.upload(source, "us") == "synthetic-file"
+    assert api.writes == [("update", "synthetic-file")] * 3
+    assert upload_env.sleeps == [2, 4]
+    assert api.execute_kwargs and all(k == {"num_retries": 3} for k in api.execute_kwargs)
+
+
+def test_upload_gives_up_after_three_retries(upload_env):
+    uploader, api, source = upload_env("synthetic-file", [ConnectionResetError()] * 4)
+    with pytest.raises(ConnectionResetError):
+        uploader.upload(source, "us")
+    assert len(api.writes) == 4 and upload_env.sleeps == [2, 4, 8]
+
+
+@pytest.mark.parametrize("error", [_http_error(403), _http_error(403, "insufficientFilePermissions"),
+                                   _http_error(404), ValueError("bad")])
+def test_upload_does_not_retry_permanent_failures(upload_env, error):
+    uploader, api, source = upload_env("synthetic-file", [error, "synthetic-file"])
+    with pytest.raises(type(error)):
+        uploader.upload(source, "us")
+    assert len(api.writes) == 1 and upload_env.sleeps == []
+
+
+def test_lost_create_response_converges_to_update_without_duplicate(upload_env):
+    uploader, api, source = upload_env(None, ["created-but-response-lost", "synthetic-file"])
+    assert uploader.upload(source, "us") == "synthetic-file"
+    assert api.writes == [("create", None), ("update", "synthetic-file")]
+
+
+@pytest.mark.parametrize("error", [_http_error(403, "userRateLimitExceeded"),
+                                   _http_error(403, "rateLimitExceeded")])
+def test_upload_retries_drive_rate_limit_403(upload_env, error):
+    uploader, api, source = upload_env("synthetic-file", [error, "synthetic-file"])
+    assert uploader.upload(source, "us") == "synthetic-file"
+    assert len(api.writes) == 2 and upload_env.sleeps == [2]
+
+
+def test_upload_retries_token_refresh_transport_error(upload_env):
+    from google.auth.exceptions import TransportError
+    uploader, api, source = upload_env("synthetic-file", [TransportError("synthetic"), "synthetic-file"])
+    assert uploader.upload(source, "us") == "synthetic-file"
+
+
+def test_folder_is_resolved_once_outside_the_retry_loop(upload_env, monkeypatch):
+    uploader, api, source = upload_env("synthetic-file", [TimeoutError(), "synthetic-file"])
+    resolved = []
+    original = uploader._get_or_create_folder
+    monkeypatch.setattr(uploader, "_get_or_create_folder",
+                        lambda path: resolved.append(path) or original(path))
+    assert uploader.upload(source, "us") == "synthetic-file"
+    assert resolved == ["us"]
+
+
+def test_folder_creation_failure_is_not_retried(upload_env, monkeypatch):
+    uploader, api, source = upload_env("synthetic-file", ["synthetic-file"])
+    calls = []
+
+    def failing(path):
+        calls.append(path)
+        raise TimeoutError()
+    monkeypatch.setattr(uploader, "_get_or_create_folder", failing)
+    with pytest.raises(TimeoutError):
+        uploader.upload(source, "us")
+    assert calls == ["us"] and api.writes == []
