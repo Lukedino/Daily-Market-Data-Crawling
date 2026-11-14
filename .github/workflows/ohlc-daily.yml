@@ -104,5 +104,11 @@ jobs:
           else
             MARKET="$INPUT_MARKET (수동 실행)"
           fi
-          MSG="🚨 OHLC Daily 수집 실패 — 대상: ${MARKET}. US/크립토 시세가 갱신되지 않았습니다. 하류 영향: ML 분석·Trading-AI-Pipeline·ATR 모니터가 하루 늦은 데이터로 돕니다. 로그: ${RUN_URL}"
-          curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" --data-urlencode "text=${MSG}" > /dev/null
+          # 양식(HTML·KST 시각·로그 링크)은 scripts/notify_failure.py 한 곳에 둔다.
+          # 체크아웃 전에 죽어 스크립트가 없으면 고정 평문으로 직접 보낸다.
+          if [ -f scripts/notify_failure.py ] && command -v python3 > /dev/null; then
+            python3 scripts/notify_failure.py --job ohlc-daily --target "$MARKET"
+          else
+            MSG="🔴 [Daily-Market] OHLC 일별 수집 실패 · 실행 로그: ${RUN_URL}"
+            curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" --data-urlencode "text=${MSG}" > /dev/null
+          fi

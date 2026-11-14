@@ -86,5 +86,11 @@ jobs:
             echo "텔레그램 시크릿 미설정 - 실패 알림 생략"
             exit 0
           fi
-          MSG="🚨 Financials Update 실패 — 대상: ${MARKET}. 이번 달 재무·ratios 스냅샷이 수집되지 않았습니다. 월 1회 실행이라 다음 자동 기회는 다음 달 1일입니다. 수동 재실행을 권합니다. 로그: ${RUN_URL}"
-          curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" --data-urlencode "text=${MSG}" > /dev/null
+          # 양식(HTML·KST 시각·로그 링크)은 scripts/notify_failure.py 한 곳에 둔다.
+          # 체크아웃 전에 죽어 스크립트가 없으면 고정 평문으로 직접 보낸다.
+          if [ -f scripts/notify_failure.py ] && command -v python3 > /dev/null; then
+            python3 scripts/notify_failure.py --job financials-update --target "$MARKET"
+          else
+            MSG="🔴 [Daily-Market] 재무 수집 실패 · 실행 로그: ${RUN_URL}"
+            curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" --data-urlencode "text=${MSG}" > /dev/null
+          fi
