@@ -138,9 +138,9 @@ def main(argv: list[str] | None = None) -> int:
     message = build_message(args.job, args.target, os.environ.get("RUN_URL", ""))
     try:
         result = send(token, chat_id, message)
-    except Exception as exc:  # 알림 실패가 워크플로 결과를 바꾸지 않게, 원인 종류만 남긴다
+    except Exception as exc:  # 원인 종류만 남긴다. 1 을 돌려주면 워크플로가 curl 평문으로 한 번 더 보낸다
         print(f"텔레그램 실패 알림 전송 실패: {type(exc).__name__}")
-        return 0
+        return 1
     print(f"텔레그램 실패 알림: {result}")
     return 0
 

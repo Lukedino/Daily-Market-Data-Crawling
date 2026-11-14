@@ -107,7 +107,7 @@ def test_main_skips_without_secrets_and_never_prints_message(monkeypatch, capsys
     assert "생략" in capsys.readouterr().out
 
 
-def test_main_swallows_send_failure_without_echoing(monkeypatch, capsys):
+def test_main_reports_send_failure_for_curl_fallback_without_echoing(monkeypatch, capsys):
     monkeypatch.setenv("TELEGRAM_TOKEN", "t")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "c")
     monkeypatch.setenv("RUN_URL", URL)
@@ -116,7 +116,7 @@ def test_main_swallows_send_failure_without_echoing(monkeypatch, capsys):
         raise OSError("network down")
 
     monkeypatch.setattr(nf, "send", boom)
-    assert nf.main(["--job", "ohlc-daily", "--target", "secret-target"]) == 0
+    assert nf.main(["--job", "ohlc-daily", "--target", "secret-target"]) == 1   # 워크플로가 curl 평문으로 재전송
     out = capsys.readouterr().out
     assert "OSError" in out and "secret-target" not in out and "영향" not in out
 
@@ -137,3 +137,10 @@ def test_market_code_target_is_shown_in_korean():
     line = nf.build_message("financials-update", "all (수동 실행)", URL, NOW).split("\n")[1]
     assert line == "11/13(금) 16:28 · 대상 전체 (수동 실행)"
     assert nf.build_message("sector-meta", "us", URL, NOW).split("\n")[1].endswith("대상 미국")
+
+
+@pytest.mark.parametrize("name", ["kr-daily", "ohlc-daily", "financials-update", "sector-meta"])
+def test_workflow_falls_back_to_plain_curl_when_script_send_fails(name):
+    text = (ROOT / ".github" / "workflows" / f"{name}.yml").read_text(encoding="utf-8")
+    assert "command -v python3 > /dev/null && python3 scripts/notify_failure.py" in text
+    assert '"disable_web_page_preview=true"' in text

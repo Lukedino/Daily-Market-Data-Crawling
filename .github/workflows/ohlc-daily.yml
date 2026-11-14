@@ -106,9 +106,9 @@ jobs:
           fi
           # 양식(HTML·KST 시각·로그 링크)은 scripts/notify_failure.py 한 곳에 둔다.
           # 체크아웃 전에 죽어 스크립트가 없으면 고정 평문으로 직접 보낸다.
-          if [ -f scripts/notify_failure.py ] && command -v python3 > /dev/null; then
-            python3 scripts/notify_failure.py --job ohlc-daily --target "$MARKET"
+          if [ -f scripts/notify_failure.py ] && command -v python3 > /dev/null && python3 scripts/notify_failure.py --job ohlc-daily --target "$MARKET"; then
+            :
           else
             MSG="🔴 [Daily-Market] OHLC 일별 수집 실패 · 실행 로그: ${RUN_URL}"
-            curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" --data-urlencode "text=${MSG}" > /dev/null
+            curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" --data-urlencode "text=${MSG}" --data-urlencode "disable_web_page_preview=true" > /dev/null
           fi

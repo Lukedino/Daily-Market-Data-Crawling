@@ -60,7 +60,7 @@ jobs:
       # 하루 늦은 데이터로 돌거나 아예 멈춘다. 2026-09-08에는 수집 0건인데도
       # run_kr_daily가 조용히 return해서 GHA가 success로 끝났고, 데이터 구멍이 하류
       # 저장소의 알림으로만 드러났다. 이제 수집 0건이면 exit 1이고 여기서 알린다.
-      # pip install 등 파이썬이 뜨기 전 단계에서 죽어도 보내야 하므로 curl로 직접 쏜다.
+      # pip install 등 파이썬이 뜨기 전 단계에서 죽어도 보내야 하므로 스크립트가 없거나 전송에 실패하면 curl 평문으로 보낸다.
       - name: Notify failure
         if: failure()
         env:
@@ -74,9 +74,9 @@ jobs:
           fi
           # 양식(HTML·KST 시각·로그 링크)은 scripts/notify_failure.py 한 곳에 둔다.
           # 체크아웃 전에 죽어 스크립트가 없으면 고정 평문으로 직접 보낸다.
-          if [ -f scripts/notify_failure.py ] && command -v python3 > /dev/null; then
-            python3 scripts/notify_failure.py --job kr-daily
+          if [ -f scripts/notify_failure.py ] && command -v python3 > /dev/null && python3 scripts/notify_failure.py --job kr-daily; then
+            :
           else
             MSG="🔴 [Daily-Market] KR 일별 수집 실패 · 실행 로그: ${RUN_URL}"
-            curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" --data-urlencode "text=${MSG}" > /dev/null
+            curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" --data-urlencode "text=${MSG}" --data-urlencode "disable_web_page_preview=true" > /dev/null
           fi
