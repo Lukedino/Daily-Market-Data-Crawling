@@ -157,3 +157,10 @@ def test_verify_ohlc_new_candidates_are_a_failure(tmp_path, monkeypatch):
 def test_verify_ohlc_clean_markets_exit_zero(tmp_path, monkeypatch):
     _verify_markets(tmp_path, monkeypatch, present=["us", "crypto"])
     assert not verify_ohlc.verify(_verify_args(), pd.Timestamp("2024-01-01").date())
+
+
+def test_verify_ohlc_help_states_fix_still_exits_one_for_unresolved_gaps(monkeypatch, capsys):
+    monkeypatch.setattr("sys.argv", ["verify_ohlc.py", "--help"])
+    with pytest.raises(SystemExit):
+        verify_ohlc.main()
+    assert "--fix 뒤에도 미해결 누락이면 1" in " ".join(capsys.readouterr().out.split())

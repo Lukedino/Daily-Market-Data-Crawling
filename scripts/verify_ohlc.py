@@ -152,7 +152,10 @@ def apply_fix(results: list[dict]):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def main():
-    parser = argparse.ArgumentParser(description="US/Crypto 백필 완결성 검증")
+    parser = argparse.ArgumentParser(
+        description="US/Crypto 백필 완결성 검증",
+        epilog="종료코드: 시장 폴더 누락·신규 후보가 있으면 1 (--fix 뒤에도 미해결 누락이면 1), 없으면 0.",
+    )
     parser.add_argument(
         "--market", choices=["us", "crypto", "all"], default="all",
         help="검증할 시장 (기본: all)"
