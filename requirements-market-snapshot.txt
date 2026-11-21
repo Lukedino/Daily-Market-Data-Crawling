@@ -1,0 +1,7 @@
+# ASCII only (pip on this Windows PC reads requirements as cp949).
+# market-snapshot.yml only: public prices for the PA morning briefing. No cloud-storage clients.
+# Same pins as requirements.txt so the yfinance behaviour matches the daily collectors.
+yfinance==1.7.0
+requests==2.34.2
+pandas==2.3.3
+numpy==1.26.4

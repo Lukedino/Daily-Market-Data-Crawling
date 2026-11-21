@@ -1,0 +1,39 @@
+name: "Market Snapshot — PA 아침 브리핑 공개 시장 숫자"
+
+# Personal Assistant 디스패처(apps/orchestrator/config/gha-schedules.json 의 market-snapshot)가
+# 06:15 KST 에 workflow_dispatch 로 깨운다. PA 는 이 run 의 artifact `market-snapshot`(snapshot.json)만 읽는다.
+# 이 잡은 Secret 을 하나도 받지 않고 클라우드 저장소에 쓰지 않는다 — 그래서 Drive 쓰기 동시성 그룹에 들어가지 않는다.
+# 공개 저장소: 로그에는 개수만, 값은 artifact 에만. 고정 지수·ETF·환율·원자재·크립토 목록 밖 종목은 넣지 않는다
+# (tests/test_market_snapshot.py 정적 검사).
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: market-snapshot
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: requirements-market-snapshot.txt
+      - name: Install dependencies
+        run: pip install -r requirements-market-snapshot.txt
+      - name: Build snapshot
+        run: python -m scripts.market_snapshot --out snapshot.json
+      - name: Upload snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: market-snapshot
+          path: snapshot.json
+          retention-days: 3
+          if-no-files-found: error
