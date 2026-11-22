@@ -68,8 +68,9 @@ US 주식/ETF, 크립토, KR(한국) 시장 OHLC + 재무데이터를 수집해 
 | `ohlc-new-ticker-backfill.yml` | workflow_dispatch | 유니버스에 새로 추가된 종목만 골라 과거 이력 백필 (daily에도 자동 통합됨) |
 | `financials-update.yml` | 외부 디스패처(매월 1일 01:00 UTC) | US/KR 재무데이터 수집 (KR은 DART, 시총 상위 1,000) |
 | `sector-meta.yml` | 매주 일요일 UTC 01:00 (KST 10:00) | US/Crypto Sector/Industry/Market 태그 수집 |
+| `market-snapshot.yml` | 외부 디스패처(PA `market-snapshot`, 매일 UTC 21:15 = KST 06:15) → workflow_dispatch | PA 아침 브리핑용 공개 시장 숫자(고정 지수·ETF·환율·원자재·크립토 26개 + 공개 김프) → artifact `market-snapshot`. **Secret 0·Drive 미사용**이라 아래 Drive 쓰기 그룹 밖(`scripts/market_snapshot.py`, 정적 검사 `tests/test_market_snapshot.py`) |
 
-7개 워크플로는 Drive 연도 파일과 `_meta`를 공유하므로 같은 concurrency 그룹
+Drive 를 쓰는 7개 워크플로는 Drive 연도 파일과 `_meta`를 공유하므로 같은 concurrency 그룹
 `daily-market-drive-writer`에서 하나씩 실행한다. `cancel-in-progress: false`와
 `queue: max`를 사용해 실행 중 작업을 유지하고 최대 100개까지 대기시킨다.
 긴 백필·재무 작업은 후속 일간 수집을 지연시킬 수 있으며, 대기 순서는 디스패치 순서와
