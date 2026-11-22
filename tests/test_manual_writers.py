@@ -128,3 +128,39 @@ def test_ohlc_empty_baseline_requires_real_key_schema(tmp_path, valid):
     else:
         with pytest.raises(ValueError, match="key schema"):
             ohlc_db._read_year_path(path, 2026)
+
+
+def _verify_args(market="all", fix=False):
+    return SimpleNamespace(market=market, drive=False, fix=fix, after="2024-01-01")
+
+
+def _verify_markets(tmp_path, monkeypatch, present, new=()):
+    """present 시장만 로컬 폴더가 있고, 분석 결과의 신규 후보는 new 다(합성 티커)."""
+    for market in present:
+        (tmp_path / market).mkdir(exist_ok=True)
+    monkeypatch.setattr(ohlc_db, "local_dir", lambda market: tmp_path / market)
+    monkeypatch.setattr(verify_ohlc, "analyze_market", lambda market, after: {
+        "market": market, "new": list(new), "already_pending": [], "first_dates": {t: after for t in new}})
+    monkeypatch.setattr(verify_ohlc, "print_report", lambda *a: None)
+
+
+def test_verify_ohlc_missing_market_folder_is_a_failure(tmp_path, monkeypatch):
+    _verify_markets(tmp_path, monkeypatch, present=["us"])
+    assert verify_ohlc.verify(_verify_args(), pd.Timestamp("2024-01-01").date()) == 1
+
+
+def test_verify_ohlc_new_candidates_are_a_failure(tmp_path, monkeypatch):
+    _verify_markets(tmp_path, monkeypatch, present=["us", "crypto"], new=["SYN-NEW"])
+    assert verify_ohlc.verify(_verify_args(), pd.Timestamp("2024-01-01").date()) == 1
+
+
+def test_verify_ohlc_clean_markets_exit_zero(tmp_path, monkeypatch):
+    _verify_markets(tmp_path, monkeypatch, present=["us", "crypto"])
+    assert not verify_ohlc.verify(_verify_args(), pd.Timestamp("2024-01-01").date())
+
+
+def test_verify_ohlc_help_states_fix_still_exits_one_for_unresolved_gaps(monkeypatch, capsys):
+    monkeypatch.setattr("sys.argv", ["verify_ohlc.py", "--help"])
+    with pytest.raises(SystemExit):
+        verify_ohlc.main()
+    assert "--fix 뒤에도 미해결 누락이면 1" in " ".join(capsys.readouterr().out.split())

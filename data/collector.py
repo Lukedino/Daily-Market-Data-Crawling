@@ -89,20 +89,6 @@ def _retry(fn, *args, label: str = "", **kwargs):
     return None
 
 
-def get_last_business_day(date: Optional[str] = None) -> str:
-    """주어진 날짜(YYYYMMDD) 또는 오늘 기준 최근 영업일 반환.
-
-    주말/공휴일을 제외한 가장 최근 평일 반환.
-    (pykrx 불필요 — 단순 평일 계산)
-    """
-    target = datetime.today() if date is None else datetime.strptime(date, "%Y%m%d")
-    for i in range(10):
-        d = target - timedelta(days=i)
-        if d.weekday() < 5:  # 0=월 ~ 4=금
-            return d.strftime("%Y%m%d")
-    return target.strftime("%Y%m%d")
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 # [1] 유니버스 (FDR) + 펀더멘탈 (pykrx 개별종목 API)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -194,18 +180,6 @@ def get_fundamentals_range(start_date: str, end_date: str,
         f"({result['ticker'].nunique()}종목)"
     )
     return result
-
-
-def get_market_snapshot(date: str) -> pd.DataFrame:
-    """
-    단일 날짜 시장 스냅샷 (일별 Daily 모드용).
-
-    get_fundamentals_range(date, date) 로 당일 PER/PBR 수집.
-    Bootstrap에는 historical.collect_market_range() 를 사용하세요.
-
-    Returns DataFrame: date, ticker, PER, PBR, EPS, BPS, DIV
-    """
-    return get_fundamentals_range(date, date)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

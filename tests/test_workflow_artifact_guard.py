@@ -32,34 +32,58 @@ def _indent(line: str) -> int:
 
 
 def _steps(text: str) -> list[list[str]]:
-    """`steps:` 아래를 스텝 단위 블록으로 쪼갠다 (YAML 파서 없이 들여쓰기로만)."""
+    """모든 잡의 `steps:` 아래를 스텝 단위 블록으로 쪼갠다 (YAML 파서 없이 들여쓰기로만)."""
     lines = text.splitlines()
-    start = next((i for i, l in enumerate(lines) if l.strip() == "steps:"), None)
-    if start is None:
-        return []
-
-    step_indent = None
     blocks: list[list[str]] = []
-    cur: list[str] | None = None
-    for line in lines[start + 1:]:
-        stripped = line.strip()
-        is_item = stripped.startswith("- ")
-        if is_item and (step_indent is None or _indent(line) == step_indent):
-            step_indent = _indent(line)
-            if cur:
-                blocks.append(cur)
-            cur = [line]
-        elif cur is not None:
-            if stripped and _indent(line) <= step_indent:
-                break                      # steps 블록을 벗어났다
-            cur.append(line)
-    if cur:
-        blocks.append(cur)
+    for start, header in enumerate(lines):
+        if header.strip() != "steps:":
+            continue
+        step_indent = None
+        cur: list[str] | None = None
+        for line in lines[start + 1:]:
+            stripped = line.strip()
+            if stripped and _indent(line) <= _indent(header):
+                break                          # 이 잡의 steps 블록을 벗어났다
+            is_item = stripped.startswith("- ")
+            if is_item and (step_indent is None or _indent(line) == step_indent):
+                step_indent = _indent(line)
+                if cur:
+                    blocks.append(cur)
+                cur = [line]
+            elif cur is not None:
+                if stripped and _indent(line) <= step_indent:
+                    break                      # steps 블록을 벗어났다
+                cur.append(line)
+        if cur:
+            blocks.append(cur)
     return blocks
 
 
 def _files() -> list[Path]:
     return sorted(WORKFLOW_DIR.glob("*.yml"))
+
+
+_TWO_JOBS = """jobs:
+  first:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run
+        run: echo first
+  second:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Upload log
+        uses: actions/upload-artifact@v4
+      - name: Notify failure
+        if: failure()
+        run: echo notify
+"""
+
+
+def test_step_splitter_reads_every_job_not_only_the_first():
+    """첫 `steps:` 만 보면 둘째 잡의 업로드·알림 스텝이 검사를 통째로 빠져나간다."""
+    names = [block[0].strip() for block in _steps(_TWO_JOBS)]
+    assert names == ["- name: Run", "- name: Upload log", "- name: Notify failure"]
 
 
 def test_workflow_dir_is_found():

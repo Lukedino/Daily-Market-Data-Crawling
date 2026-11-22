@@ -152,7 +152,10 @@ def apply_fix(results: list[dict]):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def main():
-    parser = argparse.ArgumentParser(description="US/Crypto 백필 완결성 검증")
+    parser = argparse.ArgumentParser(
+        description="US/Crypto 백필 완결성 검증",
+        epilog="종료코드: 시장 폴더 누락·신규 후보가 있으면 1 (--fix 뒤에도 미해결 누락이면 1), 없으면 0.",
+    )
     parser.add_argument(
         "--market", choices=["us", "crypto", "all"], default="all",
         help="검증할 시장 (기본: all)"
@@ -191,11 +194,13 @@ def verify(args, after):
         ohlc_db.save_pending(pending_baseline())
 
     results = []
+    missing = []
     for market in markets:
         mdir = ohlc_db.local_dir(market)
         if not mdir.exists():
             print(f"로컬 {market} 폴더 없음")
             print("--drive 옵션으로 Drive에서 다운로드하세요.")
+            missing.append(market)
             continue
         results.append(analyze_market(market, after))
 
@@ -206,6 +211,12 @@ def verify(args, after):
 
     if args.fix:
         apply_fix(results)
+
+    # 검증하지 못한 시장이 있거나 신규 후보(조치 필요)가 있으면 종료코드 1 — 스크립트·CI 가
+    # '이상 없음' 으로 읽지 않게 한다. --fix 는 pending 에 올릴 뿐 역사 누락을 메우지 않는다.
+    if missing or any(result["new"] for result in results):
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
