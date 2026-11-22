@@ -53,8 +53,6 @@ GitHub → Actions 탭에서 순서대로 수동 실행:
 4. **Bootstrap 4Y** → 2022년 수집
 5. **Bootstrap 5Y** → 2021년 수집
 
-완료 후 → **Daily Incremental**이 매일 18:30 KST 자동 실행
-
 ---
 
 ## 워크플로우 옵션
