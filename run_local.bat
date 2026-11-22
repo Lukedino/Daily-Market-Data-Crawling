@@ -10,8 +10,7 @@ echo   1. Bootstrap 1Y
 echo   2. Bootstrap 3Y
 echo   3. Bootstrap 5Y
 echo   4. Bootstrap MAX (2010~)
-echo   5. Daily incremental
-echo   6. Dry-run test (no save)
+echo   5. Dry-run test (no save)
 echo.
 set /p choice="Enter number: "
 
@@ -19,8 +18,7 @@ if "%choice%"=="1" py -3.12 main.py --mode bootstrap --years-ago 1 --upload-driv
 if "%choice%"=="2" py -3.12 main.py --mode bootstrap --years-range 3 --upload-drive
 if "%choice%"=="3" py -3.12 main.py --mode bootstrap --years-range 5 --upload-drive
 if "%choice%"=="4" py -3.12 main.py --mode bootstrap --year-start 2010 --upload-drive
-if "%choice%"=="5" py -3.12 main.py --mode daily --upload-drive
-if "%choice%"=="6" py -3.12 main.py --mode bootstrap --years-ago 1 --dry-run --upload-drive
+if "%choice%"=="5" py -3.12 main.py --mode bootstrap --years-ago 1 --dry-run --upload-drive
 
 echo.
 pause

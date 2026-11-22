@@ -53,8 +53,6 @@ GitHub → Actions 탭에서 순서대로 수동 실행:
 4. **Bootstrap 4Y** → 2022년 수집
 5. **Bootstrap 5Y** → 2021년 수집
 
-완료 후 → **Daily Incremental**이 매일 18:30 KST 자동 실행
-
 ---
 
 ## 워크플로우 옵션
@@ -78,14 +76,11 @@ export DART_API_KEY=your_key
 export GDRIVE_FOLDER_ID=your_folder_id
 export GOOGLE_APPLICATION_CREDENTIALS=gdrive_creds.json
 
-# 오늘 데이터 수집
-python main.py --mode daily --upload-drive
-
 # 2022년 데이터 수집
 python main.py --mode bootstrap --year 2022 --upload-drive
 
 # 수집 현황 확인
-python main.py --mode daily --status
+python main.py --mode bootstrap --status
 ```
 
 ---
