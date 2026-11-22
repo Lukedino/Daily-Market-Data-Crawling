@@ -17,7 +17,7 @@ import main as entry
 
 
 CANARY = "ordinary violet paper kite 7391"
-MODES = ("daily", "bootstrap", "ohlc-backfill", "ohlc-update", "ohlc-new-backfill",
+MODES = ("bootstrap", "ohlc-backfill", "ohlc-update", "ohlc-new-backfill",
          "financials-update", "kr-daily", "kr-backfill", "sector-meta")
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -364,7 +364,7 @@ def test_main_status_is_guarded_and_uses_only_synthetic_modules(tmp_path, monkey
     monkeypatch.setitem(sys.modules, "config", SimpleNamespace(LOCAL_DATA_DIR=tmp_path))
     monkeypatch.setattr(data, "progress", SimpleNamespace(print_summary=summary), raising=False)
     monkeypatch.setattr(data, "storage", SimpleNamespace(print_local_summary=summary), raising=False)
-    monkeypatch.setattr(sys, "argv", ["main.py", "--mode", "daily", "--status"])
+    monkeypatch.setattr(sys, "argv", ["main.py", "--mode", "bootstrap", "--status"])
     for mode in MODES:
         monkeypatch.setattr(entry, "run_" + mode.replace("-", "_"), forbidden)
     entry.main()

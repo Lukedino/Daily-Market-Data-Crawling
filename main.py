@@ -2,16 +2,12 @@
 main.py — 수집 전용 CLI 진입점
 
 모드:
-  daily              : 오늘 기준 시장 스냅샷 + 이번 달 일별 주가 수집
   bootstrap          : 특정 연도 과거 데이터 일괄 수집 (체크포인트 기반)
   ohlc-backfill      : US/Crypto OHLC 초기 적재 (연도 범위 지정)
   ohlc-update        : US/Crypto OHLC 증분 업데이트
   financials-update  : US 재무제표 + Crypto 시장 데이터 수집
 
 사용 예:
-  # 오늘 데이터 수집 후 Drive 업로드
-  python main.py --mode daily --upload-drive
-
   # 2025년(1년 전) 데이터 수집
   python main.py --mode bootstrap --years-ago 1 --upload-drive
 
@@ -52,65 +48,6 @@ from pathlib import Path
 from data.execution_safety import writer_lock, configure_logging, cli_entry
 
 logger = logging.getLogger(__name__)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# daily 모드
-# ══════════════════════════════════════════════════════════════════════════════
-
-def run_daily(args):
-    """
-    오늘 기준 일별 수집:
-    - 오늘 날짜 시장 스냅샷 수집
-    - 이번 달 일별 주가 수집
-    - Drive 업로드 (--upload-drive 시)
-    """
-    if args.dry_run:
-        logger.info("dry_run")
-        return
-
-    from data import collector, storage, progress
-
-    today    = datetime.today()
-    yyyymm   = today.strftime("%Y%m")
-    date_str = collector.get_last_business_day()
-
-    logger.info(f"[Daily] 기준일: {date_str} / 대상 월: {yyyymm}")
-
-    # ── 시장 스냅샷 ────────────────────────────────────────────────────────
-    if args.dry_run:
-        logger.info(f"[DryRun] market/{yyyymm} 수집 시뮬레이션")
-    else:
-        logger.info(f"[Daily] 시장 스냅샷 수집 중...")
-        df = collector.get_market_snapshot(date_str)
-        if not df.empty:
-            storage.save_market(df, yyyymm)
-            progress.mark_done("market", yyyymm)
-            logger.info(f"[Daily] 시장 스냅샷 저장 완료: {len(df)}종목")
-        else:
-            logger.warning("[Daily] 시장 스냅샷 수집 실패")
-
-    # ── 이번 달 일별 주가 ──────────────────────────────────────────────────
-    if not args.skip_prices:
-        if args.dry_run:
-            logger.info(f"[DryRun] prices/{yyyymm} 수집 시뮬레이션")
-        else:
-            logger.info(f"[Daily] 일별 주가 수집 중 ({yyyymm})...")
-            df = collector.get_daily_prices_month(yyyymm)
-            if not df.empty:
-                storage.save_prices(df, yyyymm)
-                progress.mark_done("prices", yyyymm)
-                logger.info(f"[Daily] 일별 주가 저장 완료: {len(df):,}건")
-            else:
-                logger.warning("[Daily] 일별 주가 수집 실패")
-
-    # ── Drive 업로드 ───────────────────────────────────────────────────────
-    if args.upload_drive and not args.dry_run:
-        _upload_all()
-
-    progress.print_summary()
-    storage.print_local_summary()
-    logger.info("[Daily] 완료")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1005,11 +942,11 @@ def main():
 
     parser.add_argument(
         "--mode",
-        choices=["daily", "bootstrap", "ohlc-backfill", "ohlc-rebase", "ohlc-update", "ohlc-new-backfill",
+        choices=["bootstrap", "ohlc-backfill", "ohlc-rebase", "ohlc-update", "ohlc-new-backfill",
                  "financials-update", "kr-daily", "kr-backfill", "kr-settle", "sector-meta"],
         required=True,
         help=(
-            "daily: 오늘 수집 / bootstrap: 과거 연도 일괄 수집 / "
+            "bootstrap: 과거 연도 일괄 수집 / "
             "ohlc-backfill: US/Crypto OHLC 초기 적재 / "
             "ohlc-rebase: US/Crypto 전 종목 이력을 현재 조정 기준으로 교체 (수동 1회) / "
             "ohlc-update: US/Crypto OHLC 증분 업데이트 / "
@@ -1130,9 +1067,7 @@ def main():
         logger.info(f"  모드: {args.mode} | DryRun: {args.dry_run}")
         logger.info("=" * 60)
 
-        if args.mode == "daily":
-            run_daily(args)
-        elif args.mode == "bootstrap":
+        if args.mode == "bootstrap":
             run_bootstrap(args)
         elif args.mode == "ohlc-backfill":
             run_ohlc_backfill(args)
